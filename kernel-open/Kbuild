@@ -85,6 +85,19 @@ ccflags-y += -D__KERNEL__ -DMODULE -DNVRM
 include $(src)/../version.mk
 ccflags-y += -DNV_VERSION_STRING=\"$(NVIDIA_VERSION)\"
 
+# tb-egpu (cluster A5): Kconfig-style master toggle.
+#
+# CONFIG_NV_TB_EGPU      master gate. Default y. Currently reserved as
+#                        a documentation-only symbol — gating P1-P5 out
+#                        would require wrapping all eGPU additions
+#                        across multiple clusters in #ifdef, out of
+#                        scope for the refactor. Build is "always y"
+#                        today; the symbol is defined for future use.
+CONFIG_NV_TB_EGPU       ?= y
+ifeq ($(CONFIG_NV_TB_EGPU),y)
+ccflags-y += -DCONFIG_NV_TB_EGPU
+endif
+
 # Include and link Tegra out-of-tree modules.
 ifneq ($(wildcard /usr/src/nvidia/nvidia-public),)
  SYSSRCNVOOT ?= /usr/src/nvidia/nvidia-public
