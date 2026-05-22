@@ -26,6 +26,7 @@
 #include "core/locks.h"
 
 #include "gpu/mem_mgr/vaspace_api.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards (C5)
 #include "mem_mgr/vaspace.h"
 #include "mem_mgr/gpu_vaspace.h"
 #include "mem_mgr/virtual_mem.h"
@@ -570,7 +571,14 @@ skip_destroy:
     if ((IS_VIRTUAL(pGpu) || IS_GSP_CLIENT(pGpu)) && !bBar1VA && !bFlaVA)
     {
         NV_RM_RPC_FREE(pGpu, hClient, hParent, hVASpace, status);
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST during teardown.
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "vaspaceapiDestruct: RPC_FREE returned "
+                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
     }
 
     NV_PRINTF(LEVEL_INFO,

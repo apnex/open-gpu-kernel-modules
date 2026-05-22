@@ -31,6 +31,7 @@
 #include "lib/protobuf/prb_util.h"
 #include "g_all_dcl_pb.h"
 #include "g_nvdebug_pb.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards
 
 static NV_STATUS prbAppendSubMsg(PRB_ENCODER *pPrbEnc, NvU32 tag, NvU8 *buffer, NvU32 size);
 
@@ -270,6 +271,23 @@ nvdDumpAllEngines_IMPL
         (prbEncBufLeft(pPrbEnc) > 0) && (pEngineCallback != NULL);
         pEngineCallback = pEngineCallback->pNext)
     {
+        //
+        // Crash-safety guard: stop the loop once the GPU is off the bus
+        // or otherwise inaccessible. The existing PDB_PROP_GPU_INACCESSIBLE
+        // check below sets the advisory flag but does not break the loop,
+        // so a lost GPU would still exercise every remaining engine
+        // callback, each one stalling on a dead-bus completion timeout.
+        // This break also covers PDB_PROP_GPU_IS_LOST.
+        //
+        if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ||
+            pGpu->getProperty(pGpu, PDB_PROP_GPU_INACCESSIBLE))
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "nvdDumpAllEngines: GPU lost or inaccessible, skipping remaining engine dumps\n");
+            pNvDumpState->bGpuAccessible = NV_FALSE;
+            break;
+        }
+
         NV_CHECK_OK_OR_CAPTURE_FIRST_ERROR(nvStatus, LEVEL_ERROR,
             nvdEngineDumpCallbackHelper(pGpu, pPrbEnc, pNvDumpState, pEngineCallback));
 

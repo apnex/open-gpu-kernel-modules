@@ -419,6 +419,26 @@ osHandleGpuLost
 
         gpuSetDisconnectedProperties(pGpu);
 
+        //
+        // Cross-layer disconnect propagation (C5 v3): also set the
+        // Linux-level pci_dev_is_disconnected marker so it stays
+        // consistent with the RM-level PDB_PROP_GPU_IS_LOST property
+        // just set by gpuSetDisconnectedProperties(). Without this,
+        // any code path that consults pci_dev_is_disconnected() (e.g.
+        // Linux PCI subsystem internals, AER state machine) observes
+        // a different answer than RM-side checks do, leaving the two
+        // state systems inconsistent during teardown.
+        //
+        // Before this line was added, the propagation only fired from
+        // osDevReadReg032's post-read check (added by v1 C5). When
+        // osHandleGpuLost was the detection path -- typical for
+        // ioctl/RPC-driven discovery rather than direct MMIO reads --
+        // osIsGpuBusDead() would short-circuit subsequent reads BEFORE
+        // the post-read check could run, leaving os_pci_set_disconnected
+        // uncalled. MISSION-1 E07 Run 2 (2026-05-26) surfaced the gap.
+        //
+        os_pci_set_disconnected(nv->handle);
+
         if (IS_GSP_CLIENT(pGpu))
         {
             KernelRc *pKernelRc = GPU_GET_KERNEL_RC(pGpu);

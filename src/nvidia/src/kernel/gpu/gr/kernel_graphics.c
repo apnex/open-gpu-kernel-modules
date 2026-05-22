@@ -37,6 +37,7 @@
 #include "kernel/rmapi/rmapi_utils.h"
 #include "kernel/core/locks.h"
 #include "kernel/gpu/mem_sys/kern_mem_sys.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards (C5)
 #include "kernel/mem_mgr/gpu_vaspace.h"
 #include "virtualization/hypervisor/hypervisor.h"
 #include "nvrm_registry.h"
@@ -2605,7 +2606,19 @@ void kgraphicsFreeGlobalCtxBuffers_IMPL
     {
         NV_STATUS status;
         status = kmemsysCacheOp_HAL(pGpu, pKernelMemorySystem, NULL, FB_CACHE_VIDEO_MEMORY, FB_CACHE_EVICT);
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        //
+        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST here.
+        // Cache evict against a GPU off the bus is host-side bookkeeping;
+        // C5's _issueRpcAndWait short-circuit can legitimately return
+        // GPU_IS_LOST during teardown so this assert must accept it.
+        //
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "kgraphicsFreeContextBuffers: cache evict returned "
+                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
     }
 }
 

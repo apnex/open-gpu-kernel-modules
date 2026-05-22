@@ -24,9 +24,11 @@
 #include <nv.h>                     // NV device driver interface
 #include <nv-priv.h>
 #include <nv-caps.h>
+#include <gpu/nv-gpu-lost.h>            // GPU-lost crash-safety guards
 #include <os/os.h>
 #include <nvos.h>
 #include <osapi.h>
+#include <nv_ref.h>                 // NV_PMC_BOOT_0 for the dead-bus verification read
 #include <ctrl/ctrl0000/ctrl0000gpu.h>
 #include <ctrl/ctrl0000/ctrl0000unix.h>
 #include <class/cl90cd.h> // NV_EVENT_BUFFER_BIND
@@ -1870,6 +1872,29 @@ void osDevWriteReg032(
     NV_PRIV_REG_WR32(pMapping->gpuNvAddr, thisAddress, thisValue);
 }
 
+//
+// Shared dead-bus predicate for the osDevReadRegNNN crash-safety guards.
+//
+// Returns NV_TRUE when the GPU is known to be off the bus -- either the
+// kernel's PCI layer has marked the device disconnected (e.g. via AER) or
+// the driver itself has set PDB_PROP_GPU_IS_LOST. Once that is the case,
+// every MMIO read would otherwise wait for the PCIe hardware completion
+// timeout, so the readers short-circuit on this predicate instead.
+//
+static inline NvBool osIsGpuBusDead(OBJGPU *pGpu)
+{
+    nv_state_t *nv;
+
+    if (pGpu == NULL)
+        return NV_FALSE;
+
+    nv = NV_GET_NV_STATE(pGpu);
+    if (nv != NULL && os_pci_is_disconnected(nv->handle))
+        return NV_TRUE;
+
+    return pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ? NV_TRUE : NV_FALSE;
+}
+
 NvU8 osDevReadReg008(
     OBJGPU             *pGpu,
     DEVICE_MAPPING     *pMapping,
@@ -1877,6 +1902,17 @@ NvU8 osDevReadReg008(
 )
 {
     NvU8 retval = 0;
+
+    //
+    // Dead-bus short-circuit. 8-bit reads go straight to MMIO with no
+    // vGPU passthrough, so they need the same guard as the 32-bit path:
+    // return the all-1s dead-bus value rather than stalling on a read to
+    // a GPU that is no longer present.
+    //
+    if (osIsGpuBusDead(pGpu))
+    {
+        return NV_GPU_BUS_DEAD_VALUE_U8;
+    }
 
     if (thisAddress >= pMapping->gpuNvLength)
     {
@@ -1895,6 +1931,12 @@ NvU16 osDevReadReg016(
 )
 {
     NvU16 retval = 0;
+
+    // Dead-bus short-circuit; see osIsGpuBusDead().
+    if (osIsGpuBusDead(pGpu))
+    {
+        return NV_GPU_BUS_DEAD_VALUE_U16;
+    }
 
     if (thisAddress >= pMapping->gpuNvLength)
     {
@@ -1921,12 +1963,65 @@ NvU32 osDevReadReg032(
         return retval;
     }
 
+    //
+    // Dead-bus short-circuit; see osIsGpuBusDead().
+    //
+    // Once either the kernel-level disconnect flag or the driver-level
+    // PDB_PROP_GPU_IS_LOST property is set, every subsequent MMIO read
+    // returns immediately. Without this, each post-loss read would wait
+    // for the PCIe hardware completion timeout, saturating the GPU lock
+    // and stalling the host for seconds at a time.
+    //
+    if (osIsGpuBusDead(pGpu))
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "osDevReadReg032: GPU off the bus, short-circuiting reads at offset 0x%08x\n",
+            thisAddress);
+        return NV_GPU_BUS_DEAD_VALUE_U32;
+    }
+
     if (thisAddress >= pMapping->gpuNvLength)
     {
         NV_ASSERT(thisAddress < pMapping->gpuNvLength);
     }
     else
         retval = NV_PRIV_REG_RD32(pMapping->gpuNvAddr, thisAddress);
+
+    //
+    // Post-read dead-bus detection.
+    //
+    // If the read returned the all-1s dead-bus value, the GPU may have
+    // just fallen off the bus. Confirm by reading NV_PMC_BOOT_0 directly:
+    // if that also reads back all-1s, the GPU is genuinely gone. Declare
+    // it lost via gpuSetDisconnectedProperties() -- which sets
+    // PDB_PROP_GPU_IS_LOST so the short-circuit above intercepts all
+    // further reads -- and propagate the disconnect kernel-wide via
+    // os_pci_set_disconnected().
+    //
+    // The verification read uses NV_PRIV_REG_RD32 directly, bypassing
+    // this function to avoid recursion. If the bus is dead it costs one
+    // hardware completion timeout, but happens at most once per failure
+    // event: the log-once latch and the short-circuit above intercept
+    // all subsequent reads.
+    //
+    if (retval == NV_GPU_BUS_DEAD_VALUE_U32 && pGpu != NULL)
+    {
+        nv_state_t *nv = NV_GET_NV_STATE(pGpu);
+        if (nv != NULL && nv->regs != NULL && nv->regs->map_u != NULL &&
+            !pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        {
+            NvU32 pmcBoot0 = NV_PRIV_REG_RD32(nv->regs->map_u, NV_PMC_BOOT_0);
+            if (pmcBoot0 == NV_GPU_BUS_DEAD_VALUE_U32)
+            {
+                NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                    "osDevReadReg032: GPU off the bus detected via post-read check "
+                    "(offset=0x%08x, NV_PMC_BOOT_0=0x%08x); declaring GPU lost\n",
+                    thisAddress, pmcBoot0);
+                gpuSetDisconnectedProperties(pGpu);
+                os_pci_set_disconnected(nv->handle);
+            }
+        }
+    }
 
     return retval;
 }

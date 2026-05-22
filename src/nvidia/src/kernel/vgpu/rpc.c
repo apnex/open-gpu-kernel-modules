@@ -58,6 +58,7 @@
 #if defined(NV_UNIX) && RMCFG_FEATURE_GSP_CLIENT_RM
 #include "os-interface.h"
 #endif
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards
 
 #include "griddisplayless/objgriddisplayless.h"
 
@@ -1840,6 +1841,22 @@ static NV_STATUS _issueRpcAndWait(OBJGPU *pGpu, OBJRPC *pRpc)
     // should not be called in broadcast mode
     NV_ASSERT_OR_RETURN(!gpumgrGetBcEnabledStatus(pGpu), NV_ERR_INVALID_STATE);
     NV_CHECK(LEVEL_ERROR, rmDeviceGpuLockIsOwner(pGpu->gpuInstance));
+
+    //
+    // Crash-safety guard: once PDB_PROP_GPU_IS_LOST is set, every GSP RPC
+    // would otherwise run the full send/poll/timeout cycle, holding the
+    // GPU lock for several seconds each. Short-circuit here and return the
+    // canonical NV_ERR_GPU_IS_LOST so callers know not to wait. This funnel
+    // covers the non-cleanup RPC paths (alloc, control, register, etc.);
+    // the cleanup free path is handled separately in rpcRmApiFree_GSP,
+    // which must return NV_OK because the resserv teardown asserts on it.
+    //
+    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "_issueRpcAndWait: GPU lost, returning NV_ERR_GPU_IS_LOST without issuing RPC\n");
+        return NV_ERR_GPU_IS_LOST;
+    }
 
     if (bProfileRPC)
     {
@@ -11492,6 +11509,21 @@ NV_STATUS rpcRmApiFree_GSP
     NVOS00_PARAMETERS_v03_00 *rpc_params = NULL;
     NV_STATUS status = NV_OK;
     NvU32 gpuMaskRelease = 0;
+
+    //
+    // Crash-safety guard: when the GPU is off the bus, the device-side
+    // resource free is moot -- the hardware is unresponsive and a host
+    // reboot is mandatory anyway. Return NV_OK so the resserv cleanup
+    // paths, which assert on the free RPC status, complete their
+    // host-side bookkeeping instead of asserting. Guarding the one free
+    // RPC here covers the whole cleanup cascade at a single site.
+    //
+    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "rpcRmApiFree_GSP: GPU lost, returning NV_OK so resource cleanup completes\n");
+        return NV_OK;
+    }
 
     if (!rmDeviceGpuLockIsOwner(pGpu->gpuInstance))
     {

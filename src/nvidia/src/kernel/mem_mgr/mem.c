@@ -22,6 +22,7 @@
  */
 
 #include "mem_mgr/mem.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards (C5)
 
 
 #include "platform/chipset/chipset.h"
@@ -175,7 +176,14 @@ memDestruct_IMPL
     if (pMemory->bRpcAlloc && (IS_VIRTUAL(pGpu) || IS_FW_CLIENT(pGpu)))
     {
         NV_RM_RPC_FREE(pGpu, hClient, hParent, hMemory, status);
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST during teardown.
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "memDestructCommon: RPC_FREE returned "
+                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
     }
 }
 

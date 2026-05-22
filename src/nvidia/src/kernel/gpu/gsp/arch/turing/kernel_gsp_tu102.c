@@ -27,6 +27,7 @@
 
 #include "gpu/gsp/kernel_gsp.h"
 #include "gpu/gsp/gsp_init_args.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards (C5)
 
 #include "gpu/rc/kernel_rc.h"
 #include "gpu/disp/kern_disp.h"
@@ -633,7 +634,14 @@ kgspTeardown_TU102
 
         // Reset GSP so we can load FWSEC-SB
         status = kflcnReset_HAL(pGpu, staticCast(pKernelGsp, KernelFalcon));
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST.
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "kgspUnloadRm_TU102: kflcnReset returned "
+                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
 
         // Invoke FWSEC-SB to put back PreOsApps during driver unload
         status = kgspPrepareForFwsecSb_HAL(pGpu, pKernelGsp, pKernelGsp->pFwsecUcode, &preparedCmd);

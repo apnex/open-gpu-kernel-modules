@@ -27,6 +27,7 @@
 
 #include "gpu/falcon/kernel_falcon.h"
 #include "gpu/falcon/kernel_falcon_core_dump.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards (C5)
 #include "os/os.h"
 
 #include "published/turing/tu102/dev_riscv_pri.h"
@@ -184,7 +185,14 @@ kflcnReset_TU102
     NV_ASSERT_OK_OR_RETURN(kflcnPreResetWait_HAL(pGpu, pKernelFlcn));
     NV_ASSERT_OK(kflcnResetHw(pGpu, pKernelFlcn));
     status = kflcnWaitForResetToFinish_HAL(pGpu, pKernelFlcn);
-    NV_ASSERT_OR_RETURN((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET), status);
+    // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST during reset wait.
+    if (status == NV_ERR_GPU_IS_LOST)
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "kflcnReset_TU102: WaitForResetToFinish returned "
+            "NV_ERR_GPU_IS_LOST, returning early\n");
+    }
+    NV_ASSERT_OR_GPU_LOST_OR_RETURN(status);
     if (status == NV_ERR_GPU_IN_FULLCHIP_RESET)
         return status;
     kflcnSwitchToFalcon_HAL(pGpu, pKernelFlcn);

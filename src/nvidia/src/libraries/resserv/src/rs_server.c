@@ -32,6 +32,7 @@
 
 #if !RS_STANDALONE
 #include "os/os.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards
 #endif
 
 // Describes types of clients to find when getting client entries
@@ -256,7 +257,19 @@ NV_STATUS serverFreeResourceTreeUnderLock(RsServer *pServer, RS_RES_FREE_PARAMS 
             goto done;
 
         status = clientFreeResource(pResourceRef->pClient, pServer, pFreeParams);
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        //
+        // Crash-safety guard: tolerate NV_ERR_GPU_IS_LOST here. Resource
+        // teardown against a GPU that is off the bus is host-side
+        // bookkeeping and must complete, so a lost GPU must not turn it
+        // into an assert.
+        //
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "serverFreeResourceTreeUnderLock: clientFreeResource returned "
+                "NV_ERR_GPU_IS_LOST, continuing cleanup\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
 
         serverResLock_Epilogue(pServer, LOCK_ACCESS_WRITE, pLockInfo, &releaseFlags);
     }
@@ -1372,7 +1385,15 @@ serverFreeResourceTree
         freeParams.bInvalidateOnly = bInvalidateOnly;
         freeParams.pSecInfo = pParams->pSecInfo;
         status = serverFreeResourceTreeUnderLock(pServer, &freeParams);
-        NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+        // Crash-safety guard (C5 v3, third site in rs_server.c missed by v1):
+        // tolerate NV_ERR_GPU_IS_LOST during recursive free.
+        if (status == NV_ERR_GPU_IS_LOST)
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "serverFreeResourceList: serverFreeResourceTreeUnderLock "
+                "returned NV_ERR_GPU_IS_LOST, continuing cleanup\n");
+        }
+        NV_ASSERT_OR_GPU_LOST(status);
 
         if (pServer->bDebugFreeList)
         {

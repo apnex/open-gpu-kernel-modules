@@ -46,6 +46,7 @@
 #include "nvdevid.h"
 #include "nvop.h"
 #include "jt.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards
 
 
 
@@ -2236,7 +2237,17 @@ _rcdbAddRmGpuDumpCallback
                 pRcDB->setProperty(pRcDB, PDB_PROP_RCDB_IN_DEFERRED_DUMP_CODEPATH, NV_TRUE);
 
                 status = rcdbAddRmGpuDump(pGpu);
-                NV_ASSERT(status == NV_OK);
+                //
+                // Crash-safety guard: a lost GPU makes rcdbAddRmGpuDump
+                // return non-NV_OK by design. Log the failure instead of
+                // asserting, so a lost GPU does not panic this path.
+                //
+                if (status != NV_OK)
+                {
+                    NV_PRINTF(LEVEL_ERROR,
+                              "rcdbAddRmGpuDump returned 0x%x in deferred dump path\n",
+                              status);
+                }
 
                 pRcDB->setProperty(pRcDB, PDB_PROP_RCDB_IN_DEFERRED_DUMP_CODEPATH, NV_FALSE);
 
@@ -2913,6 +2924,19 @@ rcdbAddRmGpuDump
     PRB_ENCODER         prbEnc;
     NvU32               bufferUsed;
     NvU8               *pBuf               = NULL;
+
+    //
+    // Crash-safety guard: short-circuit on PDB_PROP_GPU_IS_LOST. A GPU
+    // known to be off the bus has nothing to dump; iterating the engine
+    // callbacks via nvdDumpAllEngines would only exercise the GSP-RPC
+    // failure cascade against hardware that is no longer there.
+    //
+    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                             "rcdbAddRmGpuDump: GPU lost, skipping crash dump\n");
+        return NV_OK;
+    }
 
     if (pGpu->getProperty(pGpu, PDB_PROP_GPU_TEGRA_SOC_NVDISPLAY))
     {

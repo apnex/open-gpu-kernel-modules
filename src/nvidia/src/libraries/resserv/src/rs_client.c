@@ -30,6 +30,7 @@
 #if !(RS_STANDALONE)
 #include "os/os.h"
 #include "resserv/rs_access_map.h"
+#include "gpu/nv-gpu-lost.h"  // GPU-lost crash-safety guards
 #endif
 
 typedef enum
@@ -841,7 +842,17 @@ clientFreeResource_IMPL
     _refRemoveAllDependencies(pResourceRef);
 
     status = serverFreeResourceRpcUnderLock(pServer, pParams);
-    NV_ASSERT((status == NV_OK) || (status == NV_ERR_GPU_IN_FULLCHIP_RESET));
+    //
+    // Crash-safety guard: tolerate NV_ERR_GPU_IS_LOST here. Resource
+    // teardown against a GPU that is off the bus is host-side bookkeeping
+    // and must complete, so a lost GPU must not turn it into an assert.
+    //
+    if (status == NV_ERR_GPU_IS_LOST)
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "clientFreeResource: free RPC returned NV_ERR_GPU_IS_LOST, continuing cleanup\n");
+    }
+    NV_ASSERT_OR_GPU_LOST(status);
 
     // NV_PRINTF(LEVEL_INFO, "hClient %x: Freeing hResource: %x\n",
     //          pClient->hClient, pResourceRef->hResource);
