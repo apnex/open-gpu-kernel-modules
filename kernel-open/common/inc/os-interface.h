@@ -108,6 +108,13 @@ NV_STATUS   NV_API_CALL  os_pci_write_word                (void *, NvU32, NvU16)
 NV_STATUS   NV_API_CALL  os_pci_write_dword               (void *, NvU32, NvU32);
 NvBool      NV_API_CALL  os_pci_remove_supported          (void);
 void        NV_API_CALL  os_pci_remove                    (void *);
+//
+// Mark a PCI device as permanently disconnected, and query that state.
+// Wrap the kernel's pci_dev_is_disconnected() / pci_channel_io_perm_failure
+// transition so callers need not include <linux/pci.h>.
+//
+NvBool      NV_API_CALL  os_pci_is_disconnected           (void *);
+void        NV_API_CALL  os_pci_set_disconnected          (void *);
 NvBool      NV_API_CALL  os_pci_is_thunderbolt_attached   (void *);
 void*       NV_API_CALL  os_map_kernel_space              (NvU64, NvU64, NvU32);
 void        NV_API_CALL  os_unmap_kernel_space            (void *, NvU64);

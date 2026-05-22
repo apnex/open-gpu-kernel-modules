@@ -148,6 +148,42 @@ void NV_API_CALL os_pci_remove(
 }
 
 //
+// Mark a PCI device as permanently disconnected, and query that state.
+// Confine <linux/pci.h> to kernel-open: callers reach these through the
+// generic os_pci_* prototypes in os-interface.h.
+//
+NvBool NV_API_CALL os_pci_is_disconnected(
+    void *handle
+)
+{
+    struct pci_dev *pdev = (struct pci_dev *) handle;
+    if (!pdev)
+        return NV_FALSE;
+    return pci_dev_is_disconnected(pdev) ? NV_TRUE : NV_FALSE;
+}
+
+void NV_API_CALL os_pci_set_disconnected(
+    void *handle
+)
+{
+    struct pci_dev *pdev = (struct pci_dev *) handle;
+    if (!pdev)
+        return;
+    //
+    // pci_channel_io_perm_failure is a sink state -- once set, no
+    // transitions out -- so a non-atomic WRITE_ONCE is race-safe even
+    // if AER is concurrently transitioning the device through other
+    // states. The kernel's own pci_dev_is_disconnected() inline reads
+    // via READ_ONCE, so this matches the kernel's pattern.
+    //
+    // Linux 6.x has pci_dev_set_io_state() in drivers/pci/pci.c but
+    // it is private (not exported). Reproducing the relevant write
+    // here is the cleanest module-friendly equivalent.
+    //
+    WRITE_ONCE(pdev->error_state, pci_channel_io_perm_failure);
+}
+
+//
 // Report whether the GPU is reached over an external, hot-pluggable PCIe
 // transport (Thunderbolt or USB4).
 //
