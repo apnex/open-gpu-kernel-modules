@@ -34,6 +34,7 @@
 #include "uvm_tools.h"
 #include "uvm_common.h"
 #include "uvm_fd_type.h"
+#include "nv-tb-egpu-uvm.h"  /* tb_egpu UVM close-path telemetry (addon A4) */
 #include "uvm_linux_ioctl.h"
 #include "uvm_hmm.h"
 #include "uvm_mem.h"
@@ -175,6 +176,9 @@ static int uvm_open(struct inode *inode, struct file *filp)
     filp->private_data = NULL;
     filp->f_mapping = mapping;
 
+    /* tb_egpu close-path telemetry (addon A4): uvm-open-entry. */
+    tb_egpu_uvm_close_diag_at_open();
+
     return NV_OK;
 }
 
@@ -252,13 +256,21 @@ static int uvm_release(struct inode *inode, struct file *filp)
     void *ptr;
     uvm_fd_type_t fd_type = uvm_fd_type(filp, &ptr);
 
+    /* tb_egpu close-path telemetry (addon A4): uvm-release-entry. */
+    tb_egpu_uvm_close_diag_at_release_entry();
+
     switch (fd_type) {
         case UVM_FD_UNINITIALIZED:
             uvm_kvfree(filp->f_mapping);
             break;
 
         case UVM_FD_VA_SPACE:
+            /* tb_egpu (addon A4): pre-destroy — state before the
+             * destabilising uvm_va_space_destroy. */
+            tb_egpu_uvm_close_diag_at_pre_destroy();
             uvm_release_va_space(filp, (uvm_va_space_t *)ptr);
+            /* tb_egpu (addon A4): post-destroy. */
+            tb_egpu_uvm_close_diag_at_post_destroy();
             break;
 
         case UVM_FD_MM:
@@ -272,6 +284,9 @@ static int uvm_release(struct inode *inode, struct file *filp)
         default:
             UVM_ASSERT_MSG(0, "Unexpected fd type: %d\n", fd_type);
     }
+
+    /* tb_egpu close-path telemetry (addon A4): uvm-release-exit. */
+    tb_egpu_uvm_close_diag_at_release_exit();
 
     return 0;
 }

@@ -3,6 +3,7 @@ NVIDIA_UVM_SOURCES_CXX ?=
 
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_common.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/uvm_linux.c
+NVIDIA_UVM_SOURCES += nvidia-uvm/nv-tb-egpu-uvm.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/nvstatus.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/nvCpuUuid.c
 NVIDIA_UVM_SOURCES += nvidia-uvm/nv-kthread-q.c

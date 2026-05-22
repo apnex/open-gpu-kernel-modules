@@ -56,6 +56,7 @@
 #include "nv-dmabuf.h"
 #include "nv-caps-imex.h"
 #include "nv-tb-egpu-recover.h"  /* tb_egpu recovery (addon A3) */
+#include "nv-tb-egpu-close.h"    /* tb_egpu close-path telemetry (addon A4) */
 
 /*
  * Commit aefb2f2e619b ("x86/bugs: Rename CONFIG_RETPOLINE =>
@@ -2108,6 +2109,14 @@ void nv_stop_device(nv_state_t *nv, nvidia_stack_t *sp)
             nv_acpi_unregister_notifier(nvl);
             nv_shutdown_adapter(sp, nv, nvl);
         }
+        /*
+         * tb_egpu close-path telemetry (addon A4): post-shutdown site.
+         * usage_count is 0 here (nv_stop_device is only entered once it
+         * reaches 0).  Captures PMC_BOOT_0 + WPR2 immediately after the
+         * destabilising teardown sequence — the most diagnostic site for
+         * the close-path bug class.
+         */
+        tb_egpu_close_diag(nvl, "post-shutdown", 0L, true);
     }
 
     if (!(nv->flags & NV_FLAG_PERSISTENT_SW_STATE))
@@ -2195,6 +2204,17 @@ nvidia_close_callback(
 
     nv = NV_STATE_PTR(nvl);
 
+    /*
+     * tb_egpu close-path telemetry (addon A4): close-entry site.
+     * Captures pre-close state.  is_last_close=true triggers the
+     * PMC_BOOT_0 + WPR2 snapshot only when this close will drive
+     * usage_count to 0 (count==1 before any decrement).
+     */
+    {
+        long _tb_uc = atomic64_read(&nvl->usage_count);
+        tb_egpu_close_diag(nvl, "close-entry", _tb_uc, _tb_uc == 1);
+    }
+
     rm_cleanup_file_private(sp, nv, &nvlfp->nvfp);
 
     down(&nvl->mmap_lock);
@@ -2202,11 +2222,35 @@ nvidia_close_callback(
     up(&nvl->mmap_lock);
 
     down(&nvl->ldata_lock);
+
+    /*
+     * tb_egpu close-path telemetry (addon A4): pre-stop site.
+     * Captures state immediately before nv_close_device.  On last-close,
+     * nv_close_device calls nv_stop_device (which runs the teardown) and
+     * post-shutdown fires from within nv_stop_device.
+     */
+    {
+        long _tb_uc = atomic64_read(&nvl->usage_count);
+        tb_egpu_close_diag(nvl, "pre-stop", _tb_uc, _tb_uc == 1);
+    }
+
     nv_close_device(nv, sp);
 
     bRemove = (!NV_IS_DEVICE_IN_SURPRISE_REMOVAL(nv)) &&
               (atomic64_read(&nvl->usage_count) == 0) &&
               rm_get_device_remove_flag(sp, nv->gpu_id);
+
+    /*
+     * tb_egpu close-path telemetry (addon A4): close-exit site.
+     * Post-teardown marker.  usage_count==0 here on the last-close path
+     * means nv_stop_device just ran.  Diff this against the next open's
+     * startdev-entry / pre-rmInit to pinpoint what the close path leaves
+     * that breaks the next open.
+     */
+    {
+        long _tb_uc = atomic64_read(&nvl->usage_count);
+        tb_egpu_close_diag(nvl, "close-exit", _tb_uc, _tb_uc == 0);
+    }
 
     nv_free_file_private(nvlfp);
 

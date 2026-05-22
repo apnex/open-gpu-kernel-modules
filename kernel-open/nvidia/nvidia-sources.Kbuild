@@ -14,6 +14,7 @@ NVIDIA_SOURCES += nvidia/nv-pci.c
 NVIDIA_SOURCES += nvidia/nv-tb-egpu-pcie.c
 NVIDIA_SOURCES += nvidia/nv-tb-egpu-qwd.c
 NVIDIA_SOURCES += nvidia/nv-tb-egpu-recover.c
+NVIDIA_SOURCES += nvidia/nv-tb-egpu-close.c
 NVIDIA_SOURCES += nvidia/nv-dmabuf.c
 NVIDIA_SOURCES += nvidia/nv-nano-timer.c
 NVIDIA_SOURCES += nvidia/nv-acpi.c
