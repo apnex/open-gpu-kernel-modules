@@ -27,7 +27,8 @@
 #include "nv-msi.h"
 #include "nv-hypervisor.h"
 #include "nv-reg.h"
-#include "nv-tb-egpu-qwd.h"  /* tb_egpu Q-watchdog (addon A2) */
+#include "nv-tb-egpu-qwd.h"      /* tb_egpu Q-watchdog (addon A2) */
+#include "nv-tb-egpu-recover.h"  /* tb_egpu recovery state machine (addon A3) */
 
 #if defined(NV_VGPU_KVM_BUILD)
 #include "nv-vgpu-vfio-interface.h"
@@ -1998,6 +1999,22 @@ nv_pci_probe
     nvl->pci_dev           = pci_dev;
     nvl->dma_dev.dev       = nvl->dev;
 
+    /*
+     * tb_egpu recovery state machine (addon A3): allocate per-pdev
+     * recovery state early so the probe-time WPR2 check below has
+     * nvl->recover available. Failure is non-fatal — recover stays
+     * NULL and the check short-circuits.
+     */
+    (void)tb_egpu_recover_init(nvl);
+
+    /*
+     * tb_egpu recovery (addon A3): probe-time WPR2-stuck check.
+     * Informational only — detection-only counter. The load-bearing
+     * trigger is the post-rmInit-FAIL hook in nv_start_device (nv.c).
+     */
+    (void)tb_egpu_recover_check_wpr2_at_probe(nvl,
+            nv->bars[NV_GPU_BAR_INDEX_REGS].cpu_address);
+
     nv->pci_info.vendor_id = pci_dev->vendor;
     nv->pci_info.device_id = pci_dev->device;
     nv->subsystem_id       = pci_dev->subsystem_device;
@@ -2368,6 +2385,13 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
      * NVreg_TbEgpuQwdIntervalMs (clamped max 60s).
      */
     tb_egpu_qwd_stop(nvl);
+
+    /*
+     * tb_egpu recovery (addon A3): drain any pending recovery work
+     * and free per-pdev state before nvl is torn down.
+     * cancel_work_sync inside guarantees the work handler has returned.
+     */
+    tb_egpu_recover_stop(nvl);
 
 #if NV_IS_EXPORT_SYMBOL_GPL_iommu_dev_disable_feature
 #if defined(CONFIG_IOMMU_SVA) && \
@@ -2851,36 +2875,75 @@ extern struct dev_pm_ops nv_pm_ops;
 #endif
 
 /*
- * PCIe error-recovery callbacks (struct pci_error_handlers).
+ * tb_egpu recovery (addon A3): pci_error_handlers callback bodies.
  *
- * The open driver previously left pci_error_handlers unset, so the
- * kernel's AER / DPC machinery had no callback to reach the driver on a
- * PCIe error -- recovery aborts with "can't recover (no error_detected
- * callback)".  Registering the callbacks lets the driver participate in
- * the standard PCIe error-recovery flow like any other in-tree PCIe
- * driver.
+ * The pci_error_handlers struct and its .err_handler wiring into
+ * nv_pci_driver were registered by the base layer (C4) with stub
+ * callbacks. A3 replaces those stub bodies with the real recovery
+ * logic and adds the cor_error_detected callback.
  *
- * error_detected is state-aware: a non-fatal error (the link is still
- * up) must not tear down a working GPU, so it returns CAN_RECOVER; a
- * fatal/frozen error returns DISCONNECT -- an honest "this driver has no
- * reset-and-reinit path" rather than a false promise.
+ *   | Enable | attempts<Max | rate-limit OK | result        |
+ *   |--------|--------------|---------------|---------------|
+ *   |   0    |      —       |       —       | DISCONNECT    |  (M-base)
+ *   |   1    |     YES      |      YES      | NEED_RESET    |  (recover)
+ *   |   1    |      NO      |       —       | DISCONNECT    |  (surrender + PERMANENT_FAIL)
+ *   |   1    |     YES      |       NO      | DISCONNECT    |  (rate-limited; defer)
+ *
+ * On NEED_RESET the kernel performs the bus reset and dispatches
+ * slot_reset / resume. On DISCONNECT the kernel marks the device
+ * permanently failed; the existing GPU-lost crash-safety cleanup
+ * chain (base layer C5) runs.
+ *
+ * mmio_enabled and cor_error_detected are wired up for completeness
+ * and observability — see the helper comments below.
  */
 static pci_ers_result_t
 nv_pci_error_detected(struct pci_dev *pci_dev, pci_channel_state_t state)
 {
-    switch (state)
+    static int s_error_detected_logged = 0;
+    nv_linux_state_t *nvl;
+    struct tb_egpu_recover_state *st = NULL;
+    enum tb_egpu_recover_gate gate;
+    const char *reason = "?";
+    pci_ers_result_t result;
+    const char *result_str;
+
+    if (!s_error_detected_logged)
     {
-        case pci_channel_io_normal:
-            /* Non-fatal: the link is up, the device is still usable. */
-            pci_info(pci_dev,
-                     "AER: error_detected (non-fatal) -> CAN_RECOVER\n");
-            return PCI_ERS_RESULT_CAN_RECOVER;
+        s_error_detected_logged = 1;
+        nv_printf(NV_DBG_ERRORS,
+                  "tb_egpu recover: AER error_detected fired on %04x:%02x:%02x.%x "
+                  "(channel state=%d)\n",
+                  NV_PCI_DOMAIN_NUMBER(pci_dev), NV_PCI_BUS_NUMBER(pci_dev),
+                  NV_PCI_SLOT_NUMBER(pci_dev), PCI_FUNC(pci_dev->devfn),
+                  (int)state);
+
+        /* Trigger-event AER capture — dump full AER + DPC + link state. */
+        tb_egpu_dump_aer_trigger_event(pci_dev, "error-handler", NULL);
+    }
+
+    nvl = pci_get_drvdata(pci_dev);
+    if (nvl)
+        st = nvl->recover;
+
+    gate = tb_egpu_recover_pre_schedule_gates(st, pci_dev, &reason);
+
+    switch (gate)
+    {
+        case TB_EGPU_RECOVER_GATE_OK:
+            /*
+             * Ask the kernel to drive the bus reset. Success accounting
+             * happens in slot_reset / resume; update last_fire here so
+             * concurrent fires hit the H2 rate-limit.
+             */
+            atomic_inc(&st->fire_count);
+            st->last_fire_jiffies = jiffies;
+            tb_egpu_recover_emit_uevent(pci_dev, "RECOVERING");
+            result = PCI_ERS_RESULT_NEED_RESET;
+            result_str = "NEED_RESET";
+            break;
 
         default:
-            /* pci_channel_io_frozen / pci_channel_io_perm_failure. */
-            pci_warn(pci_dev,
-                     "AER: error_detected (state=%d) -> DISCONNECT\n",
-                     (int)state);
             /*
              * v4 sink primitive: dispatch into the C5
              * cleanupGpuLostStateAtomic via the new rm_ entry point so
@@ -2890,60 +2953,91 @@ nv_pci_error_detected(struct pci_dev *pci_dev, pci_channel_state_t state)
              * path). The NV_GPU_LOST_DETECTOR_* macros mirror
              * nv_gpu_lost_detector_t from
              * src/nvidia/inc/kernel/gpu/nv-gpu-lost.h.
+             *
+             * A3's pre_schedule_gates may also early-surrender here when
+             * the sink is already set by an earlier detector class (see
+             * A3 v4 sink-query). In that case the dispatch below is a
+             * harmless no-op because cleanupGpuLostStateAtomic is
+             * idempotent.
              */
+            if (nvl != NULL)
             {
-                nv_linux_state_t *nvl = pci_get_drvdata(pci_dev);
-                if (nvl != NULL)
+                nvidia_stack_t *aer_sp = NULL;
+                if (nv_kmem_cache_alloc_stack(&aer_sp) == 0)
                 {
-                    nvidia_stack_t *aer_sp = NULL;
-                    if (nv_kmem_cache_alloc_stack(&aer_sp) == 0)
-                    {
-                        rm_cleanup_gpu_lost_state(aer_sp,
-                                                  NV_STATE_PTR(nvl),
-                                                  NV_GPU_LOST_DETECTOR_AER_FATAL);
-                        nv_kmem_cache_free_stack(aer_sp);
-                    }
+                    rm_cleanup_gpu_lost_state(aer_sp,
+                                              NV_STATE_PTR(nvl),
+                                              NV_GPU_LOST_DETECTOR_AER_FATAL);
+                    nv_kmem_cache_free_stack(aer_sp);
                 }
             }
-            return PCI_ERS_RESULT_DISCONNECT;
+            result = PCI_ERS_RESULT_DISCONNECT;
+            result_str = "DISCONNECT";
+            break;
     }
+
+    nv_printf(NV_DBG_ERRORS,
+        "tb_egpu recover: error_detected -> %s (%s; attempts=%d/%u)\n",
+        result_str, reason,
+        st ? atomic_read(&st->attempt_count) : -1,
+        NVreg_TbEgpuRecoverMaxAttempts);
+
+    return result;
 }
 
 /*
- * mmio_enabled: dispatched after error_detected returns CAN_RECOVER,
- * once the kernel has re-enabled MMIO.  The device is reachable again
- * and there is nothing for the driver to undo.
+ * mmio_enabled: kernel may dispatch this between error_detected
+ * returning CAN_RECOVER and slot_reset. We always return NEED_RESET
+ * from error_detected (H4 path), so the kernel's normal flow won't
+ * dispatch mmio_enabled — but kernel internals occasionally invoke it
+ * via pci_walk_bus during AER recovery. Wired up:
+ *   (a) closes the err_handlers callback surface for completeness,
+ *   (b) gives us observability if the kernel ever does call it,
+ *   (c) future-proofs against kernel API changes.
+ *
+ * Pure observability — emits an AER snapshot, returns RECOVERED.
  */
 static pci_ers_result_t nv_pci_mmio_enabled(struct pci_dev *pci_dev)
 {
-    pci_info(pci_dev, "AER: mmio_enabled -> RECOVERED\n");
+    nv_printf(NV_DBG_ERRORS,
+              "tb_egpu recover: mmio_enabled callback fired on %s\n",
+              pci_name(pci_dev));
+    tb_egpu_dump_aer_trigger_event(pci_dev, "mmio-enabled", NULL);
     return PCI_ERS_RESULT_RECOVERED;
 }
 
 /*
- * slot_reset: dispatched after the kernel performs a slot reset (the
- * NEED_RESET path).  This driver does not yet request NEED_RESET, so the
- * kernel's normal flow does not reach here; the callback is present for
- * struct completeness.  Without a reset-and-reinit path the device
- * cannot be revived, so report DISCONNECT honestly.
+ * cor_error_detected: proactive observability for correctable AER
+ * errors that don't reach the uncorrectable path. The Gen3 demotion
+ * observed 2026-05-07 (Br_AER_Cor=0x1 + GPU_AER_UncMsk=0x400000
+ * demoting Internal Error to Cor=0x2000) is exactly this class. No
+ * state change, no recovery action — pure observability.
  */
-static pci_ers_result_t nv_pci_slot_reset(struct pci_dev *pci_dev)
+static void nv_pci_cor_error_detected(struct pci_dev *pci_dev)
 {
-    pci_warn(pci_dev, "AER: slot_reset with no reinit path -> DISCONNECT\n");
-    return PCI_ERS_RESULT_DISCONNECT;
+    nv_printf(NV_DBG_ERRORS,
+              "tb_egpu recover: cor_error_detected callback fired on %s\n",
+              pci_name(pci_dev));
+    tb_egpu_dump_aer_trigger_event(pci_dev, "cor-error", NULL);
 }
 
-/* resume: dispatched at the end of a successful recovery sequence. */
+/* Thin dispatchers; bodies live in nv-tb-egpu-recover.c. */
+static pci_ers_result_t nv_pci_slot_reset(struct pci_dev *pci_dev)
+{
+    return tb_egpu_recover_slot_reset(pci_dev);
+}
+
 static void nv_pci_resume(struct pci_dev *pci_dev)
 {
-    pci_info(pci_dev, "AER: resume\n");
+    tb_egpu_recover_slot_reset_resume(pci_dev);
 }
 
 static const struct pci_error_handlers nv_pci_err_handlers = {
-    .error_detected = nv_pci_error_detected,
-    .mmio_enabled   = nv_pci_mmio_enabled,
-    .slot_reset     = nv_pci_slot_reset,
-    .resume         = nv_pci_resume,
+    .error_detected     = nv_pci_error_detected,
+    .mmio_enabled       = nv_pci_mmio_enabled,
+    .slot_reset         = nv_pci_slot_reset,
+    .resume             = nv_pci_resume,
+    .cor_error_detected = nv_pci_cor_error_detected,
 };
 
 struct pci_driver nv_pci_driver = {

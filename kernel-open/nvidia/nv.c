@@ -55,6 +55,7 @@
 #include "nv-pat.h"
 #include "nv-dmabuf.h"
 #include "nv-caps-imex.h"
+#include "nv-tb-egpu-recover.h"  /* tb_egpu recovery (addon A3) */
 
 /*
  * Commit aefb2f2e619b ("x86/bugs: Rename CONFIG_RETPOLINE =>
@@ -1527,9 +1528,25 @@ int nv_start_device(nv_state_t *nv, nvidia_stack_t *sp)
         NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
                       "rm_init_adapter failed, device minor number %d\n",
                       nvl->minor_num);
+        /*
+         * tb_egpu recovery (addon A3): post-rmInit-FAIL trigger.
+         * Reads WPR2; if stuck (and gates pass) schedules an async
+         * upstream-bridge bus reset on the kernel-global workqueue.
+         * Returns immediately; the existing failure path below runs
+         * unchanged.
+         */
+        (void)tb_egpu_recover_trigger_post_rminit_fail(nvl);
         rc = -EIO;
         goto failed_release_irq;
     }
+
+    /*
+     * tb_egpu recovery (addon A3): verified end-to-end recovery —
+     * reset attempt_count so the H1 MaxAttempts gate measures
+     * consecutive failed full-recoveries rather than raw retry count.
+     * Idempotent on cold boot (attempt_count already 0).
+     */
+    tb_egpu_recover_record_post_rminit_ok(nvl);
 
     /* Generate and cache the UUID for future callers */
     (void)rm_get_gpu_uuid_raw(sp, nv);

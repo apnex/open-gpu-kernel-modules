@@ -1443,6 +1443,14 @@ typedef struct nv_linux_state_s {
      * headers. See kernel-open/nvidia/nv-tb-egpu-qwd.{c,h}.
      */
     struct tb_egpu_qwd *qwd;
+
+    /*
+     * tb_egpu in-driver recovery state machine (addon A3). Forward-
+     * declared opaque pointer; full struct in nv-tb-egpu-recover.h.
+     * NULL when NVreg_TbEgpuRecoverEnable=0 at module load (or the
+     * persistent kill-switch file overrides it to 0).
+     */
+    struct tb_egpu_recover_state *recover;
 } nv_linux_state_t;
 
 extern nv_linux_state_t *nv_linux_devices;
