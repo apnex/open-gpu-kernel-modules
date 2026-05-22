@@ -1,0 +1,258 @@
+/*
+ * SPDX-FileCopyrightText: nvidia-driver-injector contributors
+ * SPDX-License-Identifier: MIT
+ *
+ * nv-tb-egpu-pcie.c — Thunderbolt-eGPU shared PCIe/AER/WPR2 register-read
+ * primitives (addon layer A1).
+ *
+ * Pure observability: every read is passive (PCI config space + MMIO
+ * bar0 + the pcie_capability_* helpers).  No state mutation; no
+ * recovery-state coupling.
+ *
+ * These primitives are consumed by:
+ *   - A3 (nv-tb-egpu-recover.c): WPR2 read + AER trigger capture
+ *   - A2 (nv-tb-egpu-qwd.c): AER trigger capture at watchdog detection
+ *   - A3 (nv-pci.c): AER trigger capture at err_handler callbacks
+ *
+ * Sovereign layer: L1 (NVIDIA fork).  Justified because the WPR2 read
+ * needs direct BAR0 MMIO access (ioremap/ioread32/iounmap) and the AER
+ * walk needs unmodified PCI config-space helpers that are only available
+ * inside the module build.
+ *
+ * DPM note: this driver runs with NVreg_DynamicPowerManagement=0 forced
+ * via etc/modprobe.d, plus udev keeps power/control=on and
+ * d3cold_allowed=0.  The device stays in D0; all MMIO and PCI config
+ * reads in this file are safe by construction.
+ */
+
+#include "nv-tb-egpu-pcie.h"
+/* struct tb_egpu_qwd_aer_snapshot is defined in nv-tb-egpu-pcie.h */
+
+#include <linux/io.h>
+#include <linux/kernel.h>
+#include <linux/pci.h>
+#include <linux/pci_regs.h>
+#include <linux/printk.h>
+#include <linux/types.h>
+
+/* -----------------------------------------------------------------------
+ * WPR2 helper
+ * --------------------------------------------------------------------- */
+
+/*
+ * Read the raw WPR2 status register at the GB100/GB202 published offset.
+ * Returns 0 on success and stores the raw value in *raw_out; returns
+ * -errno on ioremap failure.  The mapping is page-bounded and released
+ * before return — no persistent state.
+ */
+int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out)
+{
+    void __iomem *tmp_map;
+    u64           page_aligned;
+    u32           page_offset;
+
+    if (!raw_out)
+        return -EINVAL;
+
+    *raw_out = 0;
+
+    if (bar0_phys == 0)
+        return -EINVAL;
+
+    page_aligned = (bar0_phys + TB_EGPU_RECOVER_WPR2_REG_OFFSET) & PAGE_MASK;
+    page_offset  = (bar0_phys + TB_EGPU_RECOVER_WPR2_REG_OFFSET) & ~PAGE_MASK;
+
+    tmp_map = ioremap(page_aligned, PAGE_SIZE);
+    if (!tmp_map)
+        return -ENOMEM;
+
+    *raw_out = ioread32(tmp_map + page_offset);
+    iounmap(tmp_map);
+
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * AER capture helpers
+ *
+ * Walks GPU -> immediate bridge -> true host root port.  The walker
+ * iterates pci_upstream_bridge until pci_pcie_type == ROOT_PORT
+ * (bounded to 8 hops), which is necessary on multi-bridge topologies
+ * like the AORUS hub where a one-hop walk lands on the hub upstream
+ * port instead of the host root port.
+ *
+ * Pure observability: every read is passive (PCI config space + the
+ * pcie_capability_* helpers).  No state mutation.
+ * --------------------------------------------------------------------- */
+
+struct pci_dev *tb_egpu_recover_walk_to_root_port(struct pci_dev *start)
+{
+    struct pci_dev *p = start;
+    int hops = 0;
+
+    while (p && hops < 8)
+    {
+        if (pci_pcie_type(p) == PCI_EXP_TYPE_ROOT_PORT)
+            return p;
+        p = pci_upstream_bridge(p);
+        hops++;
+    }
+    return NULL;
+}
+
+void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
+                                    bool *present_out,
+                                    u16 *dpc_status_out,
+                                    u16 *dpc_ctl_out)
+{
+    int dpc_pos;
+    u16 stat = 0, ctl = 0;
+
+    *present_out = false;
+    *dpc_status_out = 0;
+    *dpc_ctl_out = 0;
+
+    if (!pdev)
+        return;
+    dpc_pos = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_DPC);
+    if (!dpc_pos)
+        return;
+
+    *present_out = true;
+    (void)pci_read_config_word(pdev, dpc_pos + 0x04, &ctl);
+    (void)pci_read_config_word(pdev, dpc_pos + 0x06, &stat);
+    *dpc_ctl_out = ctl;
+    *dpc_status_out = stat;
+}
+
+void tb_egpu_recover_read_aer_full(struct pci_dev *pdev,
+                                   int *pos_out,
+                                   u32 *uesta, u32 *uemsk, u32 *uesvrt,
+                                   u32 *cesta, u32 *cemsk,
+                                   u32 hdrlog[4],
+                                   u32 *rootcmd, u32 *rootsta,
+                                   u32 *errsrc)
+{
+    *pos_out = 0;
+    *uesta = *uemsk = *uesvrt = *cesta = *cemsk = 0;
+    if (hdrlog) { hdrlog[0] = hdrlog[1] = hdrlog[2] = hdrlog[3] = 0; }
+    if (rootcmd) *rootcmd = 0;
+    if (rootsta) *rootsta = 0;
+    if (errsrc)  *errsrc  = 0;
+
+    if (!pdev)
+        return;
+
+    *pos_out = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
+    if (!*pos_out)
+        return;
+
+    (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_UNCOR_STATUS, uesta);
+    (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_UNCOR_MASK,   uemsk);
+    (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_UNCOR_SEVER,  uesvrt);
+    (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_COR_STATUS,   cesta);
+    (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_COR_MASK,     cemsk);
+    if (hdrlog)
+    {
+        (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_HEADER_LOG + 0,  &hdrlog[0]);
+        (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_HEADER_LOG + 4,  &hdrlog[1]);
+        (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_HEADER_LOG + 8,  &hdrlog[2]);
+        (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_HEADER_LOG + 12, &hdrlog[3]);
+    }
+    if (rootcmd) (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_ROOT_COMMAND, rootcmd);
+    if (rootsta) (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_ROOT_STATUS,  rootsta);
+    if (errsrc)  (void)pci_read_config_dword(pdev, *pos_out + PCI_ERR_ROOT_ERR_SRC, errsrc);
+}
+
+void tb_egpu_dump_aer_trigger_event(struct pci_dev *gpu_pdev,
+                                    const char *trigger,
+                                    struct tb_egpu_qwd_aer_snapshot *out)
+{
+    struct pci_dev *bridge, *root;
+    u16 gpu_lnksta = 0xffff, br_lnksta = 0xffff, root_lnksta = 0xffff;
+    u16 gpu_devsta = 0xffff, br_devsta = 0xffff, root_devsta = 0xffff;
+    int gpu_aer_pos = 0, br_aer_pos = 0, root_aer_pos = 0;
+    u32 gpu_uesta = 0, gpu_uemsk = 0, gpu_uesvrt = 0, gpu_cesta = 0, gpu_cemsk = 0;
+    u32 gpu_hdrlog[4] = {0, 0, 0, 0};
+    u32 br_uesta = 0, br_uemsk = 0, br_uesvrt = 0, br_cesta = 0, br_cemsk = 0;
+    u32 root_uesta = 0, root_uemsk = 0, root_uesvrt = 0, root_cesta = 0, root_cemsk = 0;
+    u32 root_rootcmd = 0, root_rootsta = 0, root_errsrc = 0;
+    bool dpc_present = false;
+    u16  dpc_status = 0, dpc_ctl = 0;
+    const char *trig = trigger ? trigger : "?";
+
+    if (!gpu_pdev)
+    {
+        pr_info("tb_egpu trigger [event=%s]: gpu_pdev=NULL\n", trig);
+        return;
+    }
+
+    bridge = pci_upstream_bridge(gpu_pdev);
+    root   = tb_egpu_recover_walk_to_root_port(gpu_pdev);
+
+    (void)pcie_capability_read_word(gpu_pdev, PCI_EXP_LNKSTA, &gpu_lnksta);
+    (void)pcie_capability_read_word(gpu_pdev, PCI_EXP_DEVSTA, &gpu_devsta);
+    tb_egpu_recover_read_aer_full(gpu_pdev, &gpu_aer_pos,
+                                  &gpu_uesta, &gpu_uemsk, &gpu_uesvrt,
+                                  &gpu_cesta, &gpu_cemsk,
+                                  gpu_hdrlog, NULL, NULL, NULL);
+    if (bridge)
+    {
+        (void)pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &br_lnksta);
+        (void)pcie_capability_read_word(bridge, PCI_EXP_DEVSTA, &br_devsta);
+        tb_egpu_recover_read_aer_full(bridge, &br_aer_pos,
+                                      &br_uesta, &br_uemsk, &br_uesvrt,
+                                      &br_cesta, &br_cemsk,
+                                      NULL, NULL, NULL, NULL);
+    }
+    if (root)
+    {
+        (void)pcie_capability_read_word(root, PCI_EXP_LNKSTA, &root_lnksta);
+        (void)pcie_capability_read_word(root, PCI_EXP_DEVSTA, &root_devsta);
+        tb_egpu_recover_read_aer_full(root, &root_aer_pos,
+                                      &root_uesta, &root_uemsk, &root_uesvrt,
+                                      &root_cesta, &root_cemsk,
+                                      NULL, &root_rootcmd, &root_rootsta,
+                                      &root_errsrc);
+        tb_egpu_recover_read_dpc_state(root, &dpc_present, &dpc_status, &dpc_ctl);
+    }
+
+    pr_info("tb_egpu trigger [event=%s]:\n"
+            "  GPU(%s)    LnkSta=0x%04x DevSta=0x%04x  AER UESta=0x%08x UEMsk=0x%08x UESvrt=0x%08x CESta=0x%08x CEMsk=0x%08x\n"
+            "             AER HdrLog=%08x_%08x_%08x_%08x\n"
+            "  Bridge(%s) LnkSta=0x%04x DevSta=0x%04x  AER UESta=0x%08x UEMsk=0x%08x UESvrt=0x%08x CESta=0x%08x CEMsk=0x%08x\n"
+            "  Root(%s)   LnkSta=0x%04x DevSta=0x%04x  AER UESta=0x%08x UEMsk=0x%08x CESta=0x%08x CEMsk=0x%08x\n"
+            "             RootCmd=0x%08x RootSta=0x%08x ErrorSrc=0x%08x\n"
+            "  DPC: %s\n",
+            trig,
+            pci_name(gpu_pdev), gpu_lnksta, gpu_devsta,
+            gpu_uesta, gpu_uemsk, gpu_uesvrt, gpu_cesta, gpu_cemsk,
+            gpu_hdrlog[0], gpu_hdrlog[1], gpu_hdrlog[2], gpu_hdrlog[3],
+            bridge ? pci_name(bridge) : "NULL",
+            br_lnksta, br_devsta,
+            br_uesta, br_uemsk, br_uesvrt, br_cesta, br_cemsk,
+            root ? pci_name(root) : "NULL",
+            root_lnksta, root_devsta,
+            root_uesta, root_uemsk, root_cesta, root_cemsk,
+            root_rootcmd, root_rootsta, root_errsrc,
+            dpc_present ? "(see follow-up)" : "absent");
+    if (dpc_present)
+    {
+        pr_info("tb_egpu trigger [event=%s]: DPC Status=0x%04x Ctl=0x%04x\n",
+                trig, dpc_status, dpc_ctl);
+    }
+
+    if (out)
+    {
+        out->gpu_aer_uesta  = gpu_uesta;
+        out->gpu_aer_cesta  = gpu_cesta;
+        out->br_aer_uesta   = br_uesta;
+        out->br_aer_cesta   = br_cesta;
+        out->root_aer_uesta = root_uesta;
+        out->root_aer_cesta = root_cesta;
+        out->root_rootsta   = root_rootsta;
+        out->dpc_status     = dpc_status;
+        out->valid          = 1;
+    }
+    (void)gpu_aer_pos; (void)br_aer_pos; (void)root_aer_pos;
+}
