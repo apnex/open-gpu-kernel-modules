@@ -147,6 +147,55 @@ void NV_API_CALL os_pci_remove(
     pci_stop_and_remove_bus_device(handle);
 }
 
+//
+// Report whether the GPU is reached over an external, hot-pluggable PCIe
+// transport (Thunderbolt or USB4).
+//
+// Replaces matching Thunderbolt-3-era bridge vendor/device IDs with the
+// Linux PCI subsystem's own transport classification, so that GPUs
+// tunnelled over TB4 / USB4 (Intel Barlow Ridge, AMD USB4, ...) are
+// recognised. Two independent kernel signals are consulted:
+//
+//   * pci_is_thunderbolt_attached() - true when the device, or a bridge
+//     above it, carries the Intel Thunderbolt VSEC. USB4 host routers
+//     carry it too, so this covers USB4 as well as classic Thunderbolt.
+//   * pci_dev::untrusted - set by the kernel on devices below a
+//     firmware-marked external-facing port; the endpoint-local form of
+//     the external_facing marker, covering external transports that do
+//     not expose the Intel VSEC.
+//
+// 'handle' is the GPU's struct pci_dev (nv_state_t::handle).
+//
+NvBool NV_API_CALL os_pci_is_thunderbolt_attached(
+    void *handle
+)
+{
+    struct pci_dev *pdev = (struct pci_dev *) handle;
+    NvBool tb_attached;
+    NvBool untrusted;
+
+    if (pdev == NULL)
+        return NV_FALSE;
+
+    tb_attached = pci_is_thunderbolt_attached(pdev) ? NV_TRUE : NV_FALSE;
+    untrusted   = pdev->untrusted ? NV_TRUE : NV_FALSE;
+
+    if (!tb_attached && !untrusted)
+        return NV_FALSE;
+
+    //
+    // Nominal probe-time telemetry: a single line on the rare event that
+    // an external GPU is detected. pci_info() is used because both the
+    // signals and the struct pci_dev are only available in this layer.
+    //
+    pci_info(pdev,
+        "external GPU detected (thunderbolt-attached=%s, external/untrusted=%s)\n",
+        tb_attached ? "yes" : "no",
+        untrusted ? "yes" : "no");
+
+    return NV_TRUE;
+}
+
 NV_STATUS NV_API_CALL
 os_enable_pci_req_atomics(
     void *handle,

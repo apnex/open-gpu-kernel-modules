@@ -446,123 +446,29 @@ osHandleGpuLost
 }
 
 /*!
- * @brief Traverse bus topology till Gpu's root port.
- * If any of the intermediate bridge has TB3 supported vendorId and hotplug
- * capability(not necessarily same bridge), mark the Gpu as External Gpu.
+ * @brief Determine whether the GPU is an external (Thunderbolt / USB4) GPU.
+ *
+ * Consults the Linux PCI subsystem's own transport classification via
+ * os_pci_is_thunderbolt_attached(), instead of walking the bus topology
+ * for Thunderbolt-3-era bridge vendor/device IDs. The vendor-ID walk did
+ * not recognise GPUs tunnelled over TB4 / USB4 (e.g. Intel Barlow Ridge,
+ * AMD USB4); the kernel's classification does, and is maintained by the
+ * Thunderbolt / USB4 subsystem.
  *
  * @params[in]    pGpu    OBJGPU pointer
- * @params[in]    pCl     OBJCL pointer
  *
-* @return NV_OK
-*      Identified to be eGPU
-* @return others
- *     Not an eGPU / error on identfying
- *
+ * @return NV_TRUE   GPU is reached over an external PCIe transport
+ * @return NV_FALSE  otherwise
  */
 NvBool
 RmCheckForExternalGpu
 (
-    OBJGPU *pGpu,
-    OBJCL *pCl
+    OBJGPU *pGpu
 )
 {
-    NvU8 bus;
-    NvU32 domain;
-    void *handleUp;
-    NvU8 busUp, devUp, funcUp;
-    NvU16 vendorIdUp, deviceIdUp;
-    NvU32 portCaps, pciCaps, slotCaps;
-    NvU32 PCIECapPtr;
-    RM_API *pRmApi;
-    NV_STATUS status, rmStatus;
-    NvBool bTb3Bridge = NV_FALSE, bSlotHotPlugSupport = NV_FALSE;
-    NvBool iseGPUBridge = NV_FALSE;
+    nv_state_t *nv = NV_GET_NV_STATE(pGpu);
 
-    pRmApi  = GPU_GET_PHYSICAL_RMAPI(pGpu);
-    domain  = gpuGetDomain(pGpu);
-    bus     = gpuGetBus(pGpu);
-    do
-    {
-        // Find the upstream bridge
-        handleUp = clFindP2PBrdg(pCl, domain, bus, &busUp, &devUp, &funcUp, &vendorIdUp, &deviceIdUp);
-        if (!handleUp)
-        {
-            return iseGPUBridge;
-        }
-
-        if (vendorIdUp == PCI_VENDOR_ID_INTEL)
-        {
-            // Check for the supported TB3(ThunderBolt 3) bridges.
-            NV2080_CTRL_INTERNAL_GET_EGPU_BRIDGE_INFO_PARAMS params = { 0 };
-
-            // LOCK: acquire GPUs lock
-            rmStatus = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE,
-                                         RM_LOCK_MODULES_INIT);
-            if (rmStatus != NV_OK)
-            {
-                return iseGPUBridge;
-            }
-            params.pciDeviceId = deviceIdUp;
-            status = pRmApi->Control(pRmApi,
-                                     pGpu->hInternalClient,
-                                     pGpu->hInternalSubdevice,
-                                     NV2080_CTRL_CMD_INTERNAL_GET_EGPU_BRIDGE_INFO,
-                                     &params,
-                                     sizeof(params));
-            // UNLOCK: release GPUs lock
-            rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
-
-            if (status != NV_OK)
-            {
-                NV_PRINTF(LEVEL_ERROR,
-                          "Error 0x%08x on eGPU Approval for Bridge ID: 0x%08x\n", status, deviceIdUp);
-                DBG_BREAKPOINT();
-                return iseGPUBridge;
-            }
-            else
-            {
-                // Check for the approved eGPU BUS TB3
-                if (params.iseGPUBridge &&
-                    params.approvedBusType == NV2080_CTRL_INTERNAL_EGPU_BUS_TYPE_TB3)
-                {
-                    bTb3Bridge =  NV_TRUE;
-                }
-            }
-        }
-
-        if (NV_OK != clSetPortPcieCapOffset(pCl, handleUp, &PCIECapPtr))
-        {
-            // PCIE bridge but no cap pointer.
-            break;
-        }
-
-        // Get the PCIE capabilities.
-        pciCaps = osPciReadDword(handleUp, CL_PCIE_CAP - CL_PCIE_BEGIN + PCIECapPtr);
-        if (CL_PCIE_CAP_SLOT & pciCaps)
-        {
-            // Get the slot capabilities.
-            slotCaps = osPciReadDword(handleUp, CL_PCIE_SLOT_CAP - CL_PCIE_BEGIN + PCIECapPtr);
-
-            if ((CL_PCIE_SLOT_CAP_HOTPLUG_CAPABLE & slotCaps) &&
-                (CL_PCIE_SLOT_CAP_HOTPLUG_SURPRISE & slotCaps))
-            {
-                bSlotHotPlugSupport = NV_TRUE;
-            }
-        }
-
-        if (bTb3Bridge && bSlotHotPlugSupport)
-        {
-            iseGPUBridge = NV_TRUE;
-            break;
-        }
-
-        bus = busUp;
-
-        // Get port caps to check if PCIE bridge is the root port
-        portCaps = osPciReadDword(handleUp, CL_PCIE_CAP - CL_PCIE_BEGIN + PCIECapPtr);
-
-    } while (!CL_IS_ROOT_PORT(portCaps));
-    return iseGPUBridge;
+    return os_pci_is_thunderbolt_attached(nv->handle);
 }
 
 static NV_STATUS
@@ -1349,8 +1255,6 @@ RmInitNvDevice(
 {
     // set the device context
     OBJGPU *pGpu = gpumgrGetGpu(deviceReference);
-    OBJSYS *pSys = SYS_GET_INSTANCE();
-    OBJCL  *pCl  = SYS_GET_CL(pSys);
     nv_state_t *nv = NV_GET_NV_STATE(pGpu);
     nv_priv_t *nvp = NV_GET_NV_PRIV(nv);
 
@@ -1369,7 +1273,7 @@ RmInitNvDevice(
     }
 
     // Configure eGPU setting
-    if (RmCheckForExternalGpu(pGpu, pCl))
+    if (RmCheckForExternalGpu(pGpu))
     {
         pGpu->setProperty(pGpu, PDB_PROP_GPU_IS_EXTERNAL_GPU, NV_TRUE);
         nv->is_external_gpu = NV_TRUE;

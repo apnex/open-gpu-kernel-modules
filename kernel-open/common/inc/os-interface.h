@@ -108,6 +108,7 @@ NV_STATUS   NV_API_CALL  os_pci_write_word                (void *, NvU32, NvU16)
 NV_STATUS   NV_API_CALL  os_pci_write_dword               (void *, NvU32, NvU32);
 NvBool      NV_API_CALL  os_pci_remove_supported          (void);
 void        NV_API_CALL  os_pci_remove                    (void *);
+NvBool      NV_API_CALL  os_pci_is_thunderbolt_attached   (void *);
 void*       NV_API_CALL  os_map_kernel_space              (NvU64, NvU64, NvU32);
 void        NV_API_CALL  os_unmap_kernel_space            (void *, NvU64);
 #if defined(NV_VMWARE)
