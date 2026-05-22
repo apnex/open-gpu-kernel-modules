@@ -1436,6 +1436,13 @@ typedef struct nv_linux_state_s {
 
     /* Per-device GPU init on probe setting, initialized from global NVreg_GpuInitOnProbe */
     NvBool init_on_probe;
+
+    /*
+     * tb_egpu Q-watchdog per-device state (addon A2). Forward-declared
+     * opaque pointer to avoid pulling nv-tb-egpu-qwd.h into common
+     * headers. See kernel-open/nvidia/nv-tb-egpu-qwd.{c,h}.
+     */
+    struct tb_egpu_qwd *qwd;
 } nv_linux_state_t;
 
 extern nv_linux_state_t *nv_linux_devices;

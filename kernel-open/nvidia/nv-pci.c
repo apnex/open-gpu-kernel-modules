@@ -27,6 +27,7 @@
 #include "nv-msi.h"
 #include "nv-hypervisor.h"
 #include "nv-reg.h"
+#include "nv-tb-egpu-qwd.h"  /* tb_egpu Q-watchdog (addon A2) */
 
 #if defined(NV_VGPU_KVM_BUILD)
 #include "nv-vgpu-vfio-interface.h"
@@ -2275,6 +2276,17 @@ nv_pci_probe
      */
     rm_enable_dynamic_power_management(sp, nv);
 
+    /*
+     * tb_egpu Q-watchdog (addon A2): spawn the heartbeat kthread.
+     * On this hardware NVreg_DynamicPowerManagement=0 (forced via
+     * etc/modprobe.d), and udev keeps power/control=on +
+     * d3cold_allowed=0, so the device stays in D0 and the kthread can
+     * safely read MMIO indefinitely. Failure here is non-fatal — the
+     * driver continues without watchdog, falling back to the Q-active
+     * wrapper alone.
+     */
+    (void)tb_egpu_qwd_init(nvl);
+
     nv_kmem_cache_free_stack(sp);
 
     return 0;
@@ -2346,6 +2358,16 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
     }
 
     nv = NV_STATE_PTR(nvl);
+
+    /*
+     * tb_egpu Q-watchdog (addon A2): stop the heartbeat kthread
+     * before any state teardown. The kthread reads nv->regs->map and
+     * calls os_pci_set_disconnected(nv->handle); both must remain
+     * valid until the kthread has exited. kthread_stop blocks until
+     * the thread observes kthread_should_stop, bounded by
+     * NVreg_TbEgpuQwdIntervalMs (clamped max 60s).
+     */
+    tb_egpu_qwd_stop(nvl);
 
 #if NV_IS_EXPORT_SYMBOL_GPL_iommu_dev_disable_feature
 #if defined(CONFIG_IOMMU_SVA) && \
