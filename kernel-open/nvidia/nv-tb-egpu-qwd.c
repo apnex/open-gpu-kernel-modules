@@ -52,11 +52,10 @@
  *
  * Cross-cluster dependency: the S3 AER snapshot (last_aer) is populated
  * by tb_egpu_dump_aer_trigger_event() in nv-tb-egpu-pcie.c (addon A1).
- * A3 (recovery state machine) patches the detect path below to add the
- * one-line call. Until A3 is applied, last_aer.valid stays 0 and the
- * sysfs reader emits a "(no detection event yet)" placeholder. The rest
- * of Q-watchdog (jiffies, pmc_boot_0, counters, kthread) functions
- * standalone on top of A1.
+ * A2 calls it directly at the detection latch; A1's declaration is
+ * pulled in transitively via "nv-tb-egpu-qwd.h" -> "nv-tb-egpu-pcie.h".
+ * No A3 source-side reach into this translation unit; A3 only consumes
+ * the populated last_aer field via sysfs.
  */
 
 #include "os-interface.h"
@@ -184,13 +183,13 @@ static int tb_egpu_qwd_thread(void *data)
                 /*
                  * S3 persistent detection state — populate inside the
                  * latch so it captures the first detection of an
-                 * episode. The AER snapshot (qwd->last_aer) is left
-                 * untouched here; addon A3 patches in the call to
-                 * tb_egpu_dump_aer_trigger_event() at this site to
-                 * populate it.
+                 * episode. The AER snapshot (qwd->last_aer) is filled
+                 * by the addon-A1 helper below.
                  */
                 qwd->last_detection_jiffies = jiffies;
                 qwd->last_pmc_boot_0        = boot_0;
+                tb_egpu_dump_aer_trigger_event(nvl->pci_dev, "qwd-detect",
+                                               &qwd->last_aer);
             }
 
             os_pci_set_disconnected(nv->handle);
