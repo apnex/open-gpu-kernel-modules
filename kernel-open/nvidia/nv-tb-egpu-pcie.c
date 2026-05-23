@@ -119,8 +119,19 @@ void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
         return;
 
     *present_out = true;
-    (void)pci_read_config_word(pdev, dpc_pos + 0x04, &ctl);
-    (void)pci_read_config_word(pdev, dpc_pos + 0x06, &stat);
+    /*
+     * PCIe DPC extended-cap layout (per <linux/pci_regs.h>):
+     *   +0x04  PCI_EXP_DPC_CAP     (read-mostly capability bits)
+     *   +0x06  PCI_EXP_DPC_CTL     (write-mostly enable bits)
+     *   +0x08  PCI_EXP_DPC_STATUS  (trigger / interrupt status — the
+     *                               actually-interesting register for
+     *                               incident analysis: TRIGGER bit,
+     *                               TRIGGER_RSN reason, INTERRUPT, RP_BUSY)
+     * Read CTL + STATUS only; CAP is static and not load-bearing for the
+     * dump's incident-analysis purpose.
+     */
+    (void)pci_read_config_word(pdev, dpc_pos + PCI_EXP_DPC_CTL,    &ctl);
+    (void)pci_read_config_word(pdev, dpc_pos + PCI_EXP_DPC_STATUS, &stat);
     *dpc_ctl_out = ctl;
     *dpc_status_out = stat;
 }
