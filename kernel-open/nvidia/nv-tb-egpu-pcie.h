@@ -53,8 +53,8 @@ struct tb_egpu_qwd_aer_snapshot
  * dev_hubmmu_base.h}).  DRF field _VAL is bits [31:4]; non-zero means
  * WPR2 is up.
  */
-#define TB_EGPU_RECOVER_WPR2_REG_OFFSET   0x88a828u
-#define TB_EGPU_RECOVER_WPR2_VAL_MASK     0xfffffff0u    /* bits 31:4 */
+#define TB_EGPU_PCIE_WPR2_REG_OFFSET   0x88a828u
+#define TB_EGPU_PCIE_WPR2_VAL_MASK     0xfffffff0u    /* bits 31:4 */
 
 /*
  * Read the raw WPR2 status register at the GB100/GB202 published offset.
@@ -62,7 +62,7 @@ struct tb_egpu_qwd_aer_snapshot
  * -errno on ioremap failure.  The mapping is page-bounded and released
  * before return — no persistent state.
  */
-int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out);
+int tb_egpu_pcie_read_wpr2(u64 bar0_phys, u32 *raw_out);
 
 /*
  * Walk up the PCIe topology from start toward the host root port.
@@ -70,14 +70,14 @@ int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out);
  * (bounded to 8 hops).  Returns the root-port pci_dev, or NULL if
  * not found within the hop limit.
  */
-struct pci_dev *tb_egpu_recover_walk_to_root_port(struct pci_dev *start);
+struct pci_dev *tb_egpu_pcie_walk_to_root_port(struct pci_dev *start);
 
 /*
  * Read the DPC (Downstream Port Containment) extended capability from
  * pdev.  Writes *present_out = false and zeros the status/ctl outputs
  * if the capability is absent.
  */
-void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
+void tb_egpu_pcie_read_dpc_state(struct pci_dev *pdev,
                                     bool *present_out,
                                     u16 *dpc_status_out,
                                     u16 *dpc_ctl_out);
@@ -87,7 +87,7 @@ void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
  * are zeroed before the read; NULL pointers for optional fields are safe
  * (they are skipped).
  */
-void tb_egpu_recover_read_aer_full(struct pci_dev *pdev,
+void tb_egpu_pcie_read_aer_full(struct pci_dev *pdev,
                                    int *pos_out,
                                    u32 *uesta, u32 *uemsk, u32 *uesvrt,
                                    u32 *cesta, u32 *cemsk,
@@ -99,7 +99,7 @@ void tb_egpu_recover_read_aer_full(struct pci_dev *pdev,
  * Trigger-event AER capture (legacy "Mode B telemetry S1").
  *
  * Walks GPU -> upstream bridge -> true host root port (bounded to 8
- * hops via tb_egpu_recover_walk_to_root_port), dumps full AER + DPC +
+ * hops via tb_egpu_pcie_walk_to_root_port), dumps full AER + DPC +
  * link state in one printk block, and optionally writes a compact
  * snapshot to *out for sysfs persistence (the qwd S3 surface in addon
  * A2 owns *out).

@@ -45,7 +45,7 @@
  * -errno on ioremap failure.  The mapping is page-bounded and released
  * before return — no persistent state.
  */
-int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out)
+int tb_egpu_pcie_read_wpr2(u64 bar0_phys, u32 *raw_out)
 {
     void __iomem *tmp_map;
     u64           page_aligned;
@@ -59,8 +59,8 @@ int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out)
     if (bar0_phys == 0)
         return -EINVAL;
 
-    page_aligned = (bar0_phys + TB_EGPU_RECOVER_WPR2_REG_OFFSET) & PAGE_MASK;
-    page_offset  = (bar0_phys + TB_EGPU_RECOVER_WPR2_REG_OFFSET) & ~PAGE_MASK;
+    page_aligned = (bar0_phys + TB_EGPU_PCIE_WPR2_REG_OFFSET) & PAGE_MASK;
+    page_offset  = (bar0_phys + TB_EGPU_PCIE_WPR2_REG_OFFSET) & ~PAGE_MASK;
 
     tmp_map = ioremap(page_aligned, PAGE_SIZE);
     if (!tmp_map)
@@ -85,7 +85,7 @@ int tb_egpu_recover_read_wpr2(u64 bar0_phys, u32 *raw_out)
  * pcie_capability_* helpers).  No state mutation.
  * --------------------------------------------------------------------- */
 
-struct pci_dev *tb_egpu_recover_walk_to_root_port(struct pci_dev *start)
+struct pci_dev *tb_egpu_pcie_walk_to_root_port(struct pci_dev *start)
 {
     struct pci_dev *p = start;
     int hops = 0;
@@ -100,7 +100,7 @@ struct pci_dev *tb_egpu_recover_walk_to_root_port(struct pci_dev *start)
     return NULL;
 }
 
-void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
+void tb_egpu_pcie_read_dpc_state(struct pci_dev *pdev,
                                     bool *present_out,
                                     u16 *dpc_status_out,
                                     u16 *dpc_ctl_out)
@@ -136,7 +136,7 @@ void tb_egpu_recover_read_dpc_state(struct pci_dev *pdev,
     *dpc_status_out = stat;
 }
 
-void tb_egpu_recover_read_aer_full(struct pci_dev *pdev,
+void tb_egpu_pcie_read_aer_full(struct pci_dev *pdev,
                                    int *pos_out,
                                    u32 *uesta, u32 *uemsk, u32 *uesvrt,
                                    u32 *cesta, u32 *cemsk,
@@ -199,11 +199,11 @@ void tb_egpu_dump_aer_trigger_event(struct pci_dev *gpu_pdev,
     }
 
     bridge = pci_upstream_bridge(gpu_pdev);
-    root   = tb_egpu_recover_walk_to_root_port(gpu_pdev);
+    root   = tb_egpu_pcie_walk_to_root_port(gpu_pdev);
 
     (void)pcie_capability_read_word(gpu_pdev, PCI_EXP_LNKSTA, &gpu_lnksta);
     (void)pcie_capability_read_word(gpu_pdev, PCI_EXP_DEVSTA, &gpu_devsta);
-    tb_egpu_recover_read_aer_full(gpu_pdev, &gpu_aer_pos,
+    tb_egpu_pcie_read_aer_full(gpu_pdev, &gpu_aer_pos,
                                   &gpu_uesta, &gpu_uemsk, &gpu_uesvrt,
                                   &gpu_cesta, &gpu_cemsk,
                                   gpu_hdrlog, NULL, NULL, NULL);
@@ -211,7 +211,7 @@ void tb_egpu_dump_aer_trigger_event(struct pci_dev *gpu_pdev,
     {
         (void)pcie_capability_read_word(bridge, PCI_EXP_LNKSTA, &br_lnksta);
         (void)pcie_capability_read_word(bridge, PCI_EXP_DEVSTA, &br_devsta);
-        tb_egpu_recover_read_aer_full(bridge, &br_aer_pos,
+        tb_egpu_pcie_read_aer_full(bridge, &br_aer_pos,
                                       &br_uesta, &br_uemsk, &br_uesvrt,
                                       &br_cesta, &br_cemsk,
                                       NULL, NULL, NULL, NULL);
@@ -220,12 +220,12 @@ void tb_egpu_dump_aer_trigger_event(struct pci_dev *gpu_pdev,
     {
         (void)pcie_capability_read_word(root, PCI_EXP_LNKSTA, &root_lnksta);
         (void)pcie_capability_read_word(root, PCI_EXP_DEVSTA, &root_devsta);
-        tb_egpu_recover_read_aer_full(root, &root_aer_pos,
+        tb_egpu_pcie_read_aer_full(root, &root_aer_pos,
                                       &root_uesta, &root_uemsk, &root_uesvrt,
                                       &root_cesta, &root_cemsk,
                                       NULL, &root_rootcmd, &root_rootsta,
                                       &root_errsrc);
-        tb_egpu_recover_read_dpc_state(root, &dpc_present, &dpc_status, &dpc_ctl);
+        tb_egpu_pcie_read_dpc_state(root, &dpc_present, &dpc_status, &dpc_ctl);
     }
 
     pr_info("tb_egpu trigger [event=%s]:\n"
