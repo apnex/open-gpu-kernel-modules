@@ -81,7 +81,9 @@ ccflags-y += -Wall $(DEFINES) $(INCLUDES) -Wno-cast-qual -Wno-format-extra-args
 ccflags-y += -D__KERNEL__ -DMODULE -DNVRM
 # Derive NV_VERSION_STRING from the repo-root version.mk so the module
 # version string has a single source of truth and cannot drift from a
-# hardcoded Kbuild literal.
+# hardcoded Kbuild literal. kbuild's .cmd hashing detects the expanded
+# -D value changing, so `make modules` after a NVIDIA_VERSION bump
+# rebuilds nv.o and produces correct modinfo without `make clean`.
 include $(src)/../version.mk
 ccflags-y += -DNV_VERSION_STRING=\"$(NVIDIA_VERSION)\"
 
