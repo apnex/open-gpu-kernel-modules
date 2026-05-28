@@ -29,6 +29,7 @@
  */
 #include "gpu/fsp/kern_fsp.h"
 #include "gpu/fsp/kern_fsp_retval.h"
+#include "gpu/nv-gpu-lost.h"            // v4: NV_GPU_LOST_LOG_ONCE + dead-bus sentinel
 #include "gpu/gsp/kernel_gsp.h"
 #include "gpu/gsp/gsp_init_args.h"
 #include "gpu/mem_mgr/mem_mgr.h"
@@ -619,6 +620,28 @@ _kfspWriteToEmem_GH100
     NvU32 ememOffsetEnd;
 
     reg32 = GPU_REG_RD32(pGpu, NV_PFSP_EMEMC(FSP_EMEM_CHANNEL_RM));
+
+    //
+    // v4 guard G9: arithmetic-invariant guard against dead-bus reads.
+    //
+    // If the first EMEMC read returns the all-1s dead-bus sentinel,
+    // the subsequent DRF extractions will compute a junk
+    // ememOffsetStart and the final
+    // NV_ASSERT_OR_RETURN((ememOffsetEnd - ememOffsetStart) ==
+    // wordsWritten) WILL fire even though nothing the driver does in
+    // this function could possibly have satisfied the invariant. Cross-
+    // check against the canonical sink predicate and abort cleanly with
+    // NV_ERR_GPU_IS_LOST so the caller's error-handling path runs
+    // instead of an assertion in the middle of HW touches.
+    //
+    if (reg32 == NV_GPU_BUS_DEAD_VALUE_U32 &&
+        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+            "_kfspWriteToEmem_GH100: dead-bus read on EMEMC; aborting EMEM write\n");
+        return NV_ERR_GPU_IS_LOST;
+    }
+
     ememOffsetStart = DRF_VAL(_PFSP, _EMEMC, _OFFS, reg32);
     ememOffsetStart += DRF_VAL(_PFSP, _EMEMC, _BLK, reg32) * DWORDS_PER_EMEM_BLOCK;
     NV_PRINTF(LEVEL_INFO, "About to send data to FSP, ememcOff=0x%x, size=0x%x\n", ememOffsetStart, size);

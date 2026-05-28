@@ -67,6 +67,7 @@ NV_STATUS   nv_uvm_resume_P2P           (const NvU8 *uuid);
 NvBool      nvidia_get_gpuid_list       (NvU32 *gpu_ids, NvU32 *gpu_count);
 int         nvidia_dev_get              (NvU32, nvidia_stack_t *, NvBool reset_aware);
 void        nvidia_dev_put              (NvU32, nvidia_stack_t *, NvBool reset_aware);
+NvBool      nvidia_dev_is_gpu_lost      (NvU32 gpu_id);
 int         nvidia_dev_get_uuid         (const NvU8 *, nvidia_stack_t *);
 void        nvidia_dev_put_uuid         (const NvU8 *, nvidia_stack_t *);
 int         nvidia_dev_block_gc6        (const NvU8 *, nvidia_stack_t *);

@@ -1895,6 +1895,81 @@ static inline NvBool osIsGpuBusDead(OBJGPU *pGpu)
     return pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ? NV_TRUE : NV_FALSE;
 }
 
+//
+// v4 sink primitive: cleanupGpuLostStateAtomic.
+//
+// Single, idempotent per-GPU function called by every detection input
+// (post-MMIO-read dead-bus sentinel; osHandleGpuLost retry-exhausted;
+// GSP heartbeat fatal timeout; AER fatal callback; Q-watchdog DMA
+// wedge; probe-time BAR-allocation failure; kernel-side sysfs
+// disconnect). Sets BOTH dual markers (PDB_PROP_GPU_IS_LOST via
+// gpuSetDisconnectedProperties + pci_dev_is_disconnected via
+// os_pci_set_disconnected) so detection paths that previously set only
+// one marker (or set them in different orders) now converge on a single
+// canonical state transition.
+//
+// Idempotent: a re-entry on a GPU already marked lost is a no-op. This
+// makes the primitive safe under any concurrent detector firing,
+// including re-entrant AER callbacks.
+//
+// Telemetry: emits exactly one NV_PRINTF per detector_class per kernel
+// module lifetime. This consolidates the per-site NV_GPU_LOST_LOG_ONCE
+// latches from C5 v1+v3 into a per-detector-class canonical log,
+// dropping log volume by a factor proportional to the number of guards
+// downstream of each detector.
+//
+void cleanupGpuLostStateAtomic(OBJGPU *pGpu,
+                               nv_gpu_lost_detector_t detector_class)
+{
+    nv_state_t *nv;
+
+    if (pGpu == NULL)
+        return;
+
+    //
+    // Idempotent: if PDB_PROP_GPU_IS_LOST is already set, the primitive
+    // has run at least once and the markers are coherent. Skip the
+    // re-issue of gpuSetDisconnectedProperties / os_pci_set_disconnected
+    // so re-entry from a different detector input is a no-op.
+    //
+    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        return;
+
+    gpuSetDisconnectedProperties(pGpu);
+
+    nv = NV_GET_NV_STATE(pGpu);
+    if (nv != NULL && nv->handle != NULL)
+        os_pci_set_disconnected(nv->handle);
+
+    //
+    // Per-(gpu, detector_class) log-once latch. The bitmap lives in
+    // nv_state_t so the latch is per-physical-GPU; on multi-GPU hosts
+    // the second GPU's loss is no longer silenced by the first GPU's
+    // log having already fired.
+    //
+    // Exactly-once across concurrent detector fire: __atomic_fetch_or
+    // returns the prior value; we emit the NV_PRINTF only if the bit
+    // we are setting was clear in that prior value. The dual-marker
+    // writes above (gpuSetDisconnectedProperties /
+    // os_pci_set_disconnected) are already idempotent under the
+    // PDB_PROP_GPU_IS_LOST gate; this latch closes the only remaining
+    // load-store gap (the double-log under simultaneous fire).
+    //
+    if (nv != NULL &&
+        (NvU32)detector_class <= (NvU32)DETECTOR_UVM_FATAL)
+    {
+        NvU8 mask = (NvU8)(1U << (NvU32)detector_class);
+        NvU8 prior = __atomic_fetch_or(&nv->gpu_lost_detector_logged,
+                                       mask, __ATOMIC_RELAXED);
+        if ((prior & mask) == 0)
+        {
+            NV_PRINTF(LEVEL_ERROR,
+                      "GPU %u lost via detector_class=%u\n",
+                      gpuGetInstance(pGpu), (unsigned)detector_class);
+        }
+    }
+}
+
 NvU8 osDevReadReg008(
     OBJGPU             *pGpu,
     DEVICE_MAPPING     *pMapping,
@@ -1974,9 +2049,8 @@ NvU32 osDevReadReg032(
     //
     if (osIsGpuBusDead(pGpu))
     {
-        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-            "osDevReadReg032: GPU off the bus, short-circuiting reads at offset 0x%08x\n",
-            thisAddress);
+        // C5 v4: per-site log retired; canonical sink log already fired
+        // at the detector that set the sink-state markers.
         return NV_GPU_BUS_DEAD_VALUE_U32;
     }
 
@@ -1988,21 +2062,21 @@ NvU32 osDevReadReg032(
         retval = NV_PRIV_REG_RD32(pMapping->gpuNvAddr, thisAddress);
 
     //
-    // Post-read dead-bus detection.
+    // Post-read dead-bus detection (v4: routes through sink primitive).
     //
     // If the read returned the all-1s dead-bus value, the GPU may have
     // just fallen off the bus. Confirm by reading NV_PMC_BOOT_0 directly:
     // if that also reads back all-1s, the GPU is genuinely gone. Declare
-    // it lost via gpuSetDisconnectedProperties() -- which sets
-    // PDB_PROP_GPU_IS_LOST so the short-circuit above intercepts all
-    // further reads -- and propagate the disconnect kernel-wide via
-    // os_pci_set_disconnected().
+    // it lost via cleanupGpuLostStateAtomic(DETECTOR_MMIO_DEAD), which
+    // sets BOTH dual markers (RM PDB_PROP_GPU_IS_LOST + Linux
+    // pci_dev_is_disconnected) atomically and emits one canonical
+    // per-detector-class log line.
     //
     // The verification read uses NV_PRIV_REG_RD32 directly, bypassing
     // this function to avoid recursion. If the bus is dead it costs one
     // hardware completion timeout, but happens at most once per failure
-    // event: the log-once latch and the short-circuit above intercept
-    // all subsequent reads.
+    // event: the sink primitive's idempotence and the short-circuit
+    // above intercept all subsequent reads.
     //
     if (retval == NV_GPU_BUS_DEAD_VALUE_U32 && pGpu != NULL)
     {
@@ -2013,12 +2087,7 @@ NvU32 osDevReadReg032(
             NvU32 pmcBoot0 = NV_PRIV_REG_RD32(nv->regs->map_u, NV_PMC_BOOT_0);
             if (pmcBoot0 == NV_GPU_BUS_DEAD_VALUE_U32)
             {
-                NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                    "osDevReadReg032: GPU off the bus detected via post-read check "
-                    "(offset=0x%08x, NV_PMC_BOOT_0=0x%08x); declaring GPU lost\n",
-                    thisAddress, pmcBoot0);
-                gpuSetDisconnectedProperties(pGpu);
-                os_pci_set_disconnected(nv->handle);
+                cleanupGpuLostStateAtomic(pGpu, DETECTOR_MMIO_DEAD);
             }
         }
     }

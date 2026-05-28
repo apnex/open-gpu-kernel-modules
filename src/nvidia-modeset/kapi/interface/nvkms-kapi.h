@@ -672,6 +672,29 @@ struct NvKmsKapiFunctionsTable {
     void (*freeDevice)(struct NvKmsKapiDevice *device);
 
     /*!
+     * v4 guard G10: query the dead-bus state of the underlying GPU.
+     *
+     * Returns NV_TRUE iff the PCI device backing this NvKmsKapiDevice
+     * has been marked permanently disconnected (Linux
+     * pci_dev_is_disconnected, set by the kernel's AER DISCONNECT
+     * callback or by the C5 sink primitive cleanupGpuLostStateAtomic).
+     *
+     * The query is lock-free at the RM layer and is safe to call from
+     * any context, including the nvidia-drm remove path, where it
+     * gates hardware-touching teardown to avoid the >5min teardown
+     * hang documented in GitHub issue #1134.
+     *
+     * Returns NV_FALSE on a null device or unknown gpuId (fail-safe:
+     * assume alive if we can't tell; downstream teardown proceeds as
+     * normal).
+     *
+     * \param [in]  device  A device returned by allocateDevice().
+     *
+     * \return NV_TRUE if the GPU is off the bus, NV_FALSE otherwise.
+     */
+    NvBool (*isGpuLost)(struct NvKmsKapiDevice *device);
+
+    /*!
      * Grab ownership of device, ownership is required to do modeset.
      *
      * \param [in]  device  A device returned by allocateDevice().

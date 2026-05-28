@@ -1853,8 +1853,7 @@ static NV_STATUS _issueRpcAndWait(OBJGPU *pGpu, OBJRPC *pRpc)
     //
     if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
     {
-        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-            "_issueRpcAndWait: GPU lost, returning NV_ERR_GPU_IS_LOST without issuing RPC\n");
+        // C5 v4: per-site log retired in favor of canonical sink-side log.
         return NV_ERR_GPU_IS_LOST;
     }
 
@@ -2089,6 +2088,16 @@ static NV_STATUS _issueRpcLarge
 
     // should not be called in broadcast mode
     NV_ASSERT_OR_RETURN(!gpumgrGetBcEnabledStatus(pGpu), NV_ERR_INVALID_STATE);
+
+    //
+    // v4 guard G3: large multi-chunk Control RPCs bypass _issueRpcAndWait
+    // (which carries G2). Mirror the same sink-check here so a lost GPU
+    // short-circuits without spending the full chunked send/poll budget.
+    //
+    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        return NV_ERR_GPU_IS_LOST;
+    }
 
     // Copy the initial buffer
     entryLength = NV_MIN(bufSize, pRpc->maxRpcSize);
@@ -11520,8 +11529,7 @@ NV_STATUS rpcRmApiFree_GSP
     //
     if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
     {
-        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-            "rpcRmApiFree_GSP: GPU lost, returning NV_OK so resource cleanup completes\n");
+        // C5 v4: per-site log retired in favor of canonical sink-side log.
         return NV_OK;
     }
 

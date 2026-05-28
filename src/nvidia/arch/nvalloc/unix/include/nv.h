@@ -642,6 +642,18 @@ typedef struct nv_state_t
     /* Bool to check if power management is supported */
     NvBool is_pm_unsupported;
 
+    /*
+     * Per-GPU bitmap of which detector classes have already emitted their
+     * "GPU lost via detector_class=N" log line. Set by
+     * cleanupGpuLostStateAtomic() (src/nvidia/arch/nvalloc/unix/src/os.c)
+     * so the log is emitted exactly once per (gpu, detector_class), not
+     * once per detector_class across all GPUs. One bit per detector
+     * (DETECTOR_MMIO_DEAD .. DETECTOR_UVM_FATAL, currently 8 entries in
+     * src/nvidia/inc/kernel/gpu/nv-gpu-lost.h); NvU8 has headroom for the
+     * full enum.
+     */
+    NvU8 gpu_lost_detector_logged;
+
 } nv_state_t;
 
 #define NVFP_TYPE_NONE       ((NvU32)0x0)

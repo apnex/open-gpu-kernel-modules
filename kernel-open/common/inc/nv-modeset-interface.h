@@ -121,6 +121,21 @@ typedef struct {
 
     int (*set_callbacks)(const nvidia_modeset_callbacks_t *cb);
 
+    /*
+     * v4 guard G10 support: lock-free query of the Linux-side dead-bus
+     * marker for the given gpu_id. Returns NV_TRUE if the underlying PCI
+     * device has been marked permanently disconnected
+     * (pci_dev_is_disconnected), or NV_FALSE otherwise (including when
+     * gpu_id is unknown -- fail-safe: assume alive if we can't tell).
+     *
+     * This query does NOT take the RM API lock, so it is safe to call
+     * from teardown paths (e.g. nvidia-drm's nv_drm_remove) that may be
+     * racing concurrent RM activity. The Linux marker is half of the C5
+     * v4 dual-marker sink state; either marker being set is sufficient
+     * to indicate the GPU is off the bus.
+     */
+    NvBool (*is_gpu_lost)(NvU32 gpu_id);
+
 } nvidia_modeset_rm_ops_t;
 
 NV_STATUS nvidia_get_rm_ops(nvidia_modeset_rm_ops_t *rm_ops);

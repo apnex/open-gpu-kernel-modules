@@ -641,6 +641,23 @@ static void FreeDevice(struct NvKmsKapiDevice *device)
     nvKmsKapiFree(device);
 }
 
+/*
+ * v4 guard G10: thin wrapper exposing the nvidia.ko-side Linux dead-bus
+ * marker through the NvKmsKapi function table. Used by nvidia-drm's
+ * nv_drm_remove to short-circuit hardware-touching teardown when the
+ * GPU has gone off the bus (see GitHub issue #1134).
+ *
+ * Returns NV_FALSE for a null device (fail-safe: assume alive if we
+ * can't tell).
+ */
+static NvBool IsGpuLost(struct NvKmsKapiDevice *device)
+{
+    if (device == NULL) {
+        return NV_FALSE;
+    }
+    return nvkms_is_gpu_lost(device->gpuId);
+}
+
 NvBool nvKmsKapiAllocateSystemMemory(struct NvKmsKapiDevice *device,
                                      NvU32 hRmHandle,
                                      enum NvKmsSurfaceMemoryLayout layout,
@@ -4014,6 +4031,7 @@ NvBool nvKmsKapiGetFunctionsTableInternal
 
     funcsTable->allocateDevice = AllocateDevice;
     funcsTable->freeDevice     = FreeDevice;
+    funcsTable->isGpuLost      = IsGpuLost;
 
     funcsTable->grabOwnership    = GrabOwnership;
     funcsTable->releaseOwnership = ReleaseOwnership;

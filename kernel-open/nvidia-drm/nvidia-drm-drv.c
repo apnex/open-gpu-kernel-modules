@@ -2182,16 +2182,122 @@ static void nv_drm_dev_destroy(struct nv_drm_device *nv_dev)
 }
 
 /*
+ * v4 guard G10: lost-GPU teardown path.
+ *
+ * Cancels in-flight worker(s) so they cannot fire after free, then
+ * releases the DRM refcount and frees the private nv_drm_device wrapper.
+ * Skips every hardware-touching operation that nv_drm_dev_unload would
+ * normally perform: drm_atomic_helper_shutdown, releaseOwnership,
+ * declareEventInterest, freeDevice (all of which issue RPC into NVKMS
+ * and onward to the GPU), as well as drm_kms_helper_poll_fini and
+ * drm_mode_config_cleanup (both of which iterate DRM objects whose
+ * destroy callbacks may touch the device).
+ *
+ * Trade-off: this path intentionally leaks
+ *   (1) DRM-core internal state -- connector/encoder/crtc objects,
+ *       mode config; reclaimed by drm_dev_put refcount drop only if
+ *       drm_mode_config_cleanup runs, which we skip; and
+ *   (2) the underlying NvKmsKapiDevice struct (kmalloc-backed via
+ *       nvkms_alloc -> kmalloc(GFP_KERNEL)) including the RM client
+ *       handle and the per-device semaphore -- normally freed by
+ *       nvKms->freeDevice, which we skip here to avoid the RPC ->
+ *       MMIO chain against a dead bus.
+ *
+ * The NvKmsKapiDevice leak is NOT reclaimed at nvidia-modeset module
+ * unload: nvKmsModuleUnload does not walk a master list to free
+ * outstanding per-GPU devices (there is no such list -- they are
+ * owned by external callers like nvidia-drm). The leak therefore
+ * persists across rmmod/insmod of nvidia-modeset, freed only at host
+ * reboot. Per-event cost is O(1KB) and the event is once per
+ * lost-GPU teardown (typically 0-1 over a host lifetime), so the
+ * leak is bounded but real. A forced-cleanup path that calls
+ * freeDevice through the C5 G2/G3-guarded RPC funnels (which
+ * short-circuit on PDB_PROP_GPU_IS_LOST) is feasible follow-on work;
+ * it is deferred from this commit pending a dedicated review of the
+ * freeDevice teardown chain. See injector docs
+ * patch-intents/C5-crash-safety.md G10 scenario for status.
+ *
+ * This is an explicit choice -- a bounded memory leak on permanent
+ * device-removal is strictly preferable to the >5min teardown hang
+ * that triggers in the full-unload path when MMIO/RPC times out
+ * against a dead bus (GitHub issue #1134).
+ */
+static void nv_drm_dev_destroy_lost(struct nv_drm_device *nv_dev)
+{
+    struct drm_device *dev = nv_dev->dev;
+
+    NV_DRM_DEV_LOG_INFO(nv_dev,
+        "v4 G10: GPU lost, skipping hardware-touching teardown "
+        "(drm_atomic_helper_shutdown / releaseOwnership / "
+        "declareEventInterest / freeDevice / poll_fini / "
+        "mode_config_cleanup)");
+
+    /*
+     * Cancel any in-flight hotplug worker so it cannot fire after
+     * nv_drm_free below. The cancel itself is internal kernel
+     * workqueue state -- it does not touch the GPU.
+     */
+    cancel_delayed_work_sync(&nv_dev->hotplug_event_work);
+
+    /* Clear the cached NvKmsKapiDevice pointer without freeing it via
+     * NVKMS; the underlying RM-side state is torn down by the AER /
+     * pci-remove callbacks. The struct itself leaks (see function
+     * header comment above for full leak enumeration + reclaim
+     * status); skipping freeDevice is safer than issuing an RPC
+     * that will hang on a dead bus.
+     */
+    nv_dev->pDevice = NULL;
+
+    drm_dev_put(dev);
+    nv_drm_free(nv_dev);
+}
+
+/*
  * Unregister a single NVIDIA DRM device.
+ *
+ * v4 guard G10: sink-aware teardown entry. The #1134 wedge class
+ * exhibits nvidia-drm teardown hangs >5min when the underlying GPU
+ * has gone off the bus mid-operation: drm_dev_unplug itself is fine
+ * (pure DRM-core state), but the subsequent nv_drm_dev_destroy ->
+ * nv_drm_dev_unload chain issues NVKMS RPC -> RM MMIO that each
+ * timeout against the dead bus.
+ *
+ * Query the cross-module isGpuLost predicate via the NvKmsKapi
+ * function table BEFORE calling drm_dev_unplug -- pDevice will be
+ * cleared by the lost-path destroyer below, and the query itself is
+ * lock-free and side-effect free. If the sink is set, route to the
+ * lost-path destroyer which skips every hardware-touching operation.
+ *
+ * Per design constraint, the drm_dev_unplug() call is unconditional;
+ * the DRM core requires it regardless of device state to release any
+ * waiters on userspace file ops and tear down dma-buf bindings.
  */
 void nv_drm_remove(NvU32 gpuId)
 {
     struct nv_drm_device *nv_dev = nv_drm_find_and_remove_device(gpuId);
+    NvBool isLost;
 
     if (nv_dev) {
-        NV_DRM_DEV_LOG_INFO(nv_dev, "Removing device");
+        /* Note: stale-read race here is benign -- if AER fires between this
+         * query and the destroyer dispatch, the C5 G2/G3 funnels in
+         * nvidia.ko's _issueRpcAndWait[Large] short-circuit any RPCs the
+         * destroyer would issue. Hang class is not reintroduced; worst case
+         * is extra short-circuit logs + heavier teardown path. No re-query
+         * inside the destroyer is needed. */
+        isLost = (nvKms->isGpuLost != NULL) &&
+                 nvKms->isGpuLost(nv_dev->pDevice);
+
+        NV_DRM_DEV_LOG_INFO(nv_dev,
+            "Removing device (v4 G10 teardown entry; gpuLost=%s)",
+            isLost ? "true" : "false");
+
         drm_dev_unplug(nv_dev->dev);
-        nv_drm_dev_destroy(nv_dev);
+
+        if (isLost) {
+            nv_drm_dev_destroy_lost(nv_dev);
+        } else {
+            nv_drm_dev_destroy(nv_dev);
+        }
     }
 }
 

@@ -1916,6 +1916,38 @@ nv_pci_probe
     if (!nv_pci_validate_bars(pci_dev, /* only_bar0 = */ NV_TRUE))
         goto failed;
 
+    /*
+     * v4 detector [g]: probe-time BAR-allocation failure.
+     *
+     * If the Linux PCI core failed to assign a memory window for any
+     * BAR (IORESOURCE_UNSET), the device cannot be driven. Without
+     * this guard, the driver proceeds into rm_init_adapter / GSP-FMC
+     * bootstrap which can only fail in obscure ways (see upstream
+     * issue #974). Refuse to probe further with -ENODEV; the caller's
+     * normal probe-failure path applies.
+     *
+     * No sink-primitive call here: OBJGPU is not constructed yet at
+     * probe entry (the probe-failure case takes the goto-failed path
+     * and never allocates the nv_priv_t state that backs OBJGPU). The
+     * -ENODEV return is the actionable behavior — Linux PCI core will
+     * not retry probe and userspace sees the bind failure directly.
+     */
+    {
+        int bar_idx;
+        for (bar_idx = 0; bar_idx < NV_GPU_NUM_BARS; bar_idx++)
+        {
+            if (pci_resource_flags(pci_dev, bar_idx) & IORESOURCE_UNSET)
+            {
+                nv_printf(NV_DBG_ERRORS,
+                    "NVRM: BAR %d not assigned by Linux PCI core "
+                    "(IORESOURCE_UNSET); refusing to probe further "
+                    "(detector_class=5 DETECTOR_PROBE_BAR_FAILURE)\n",
+                    bar_idx);
+                goto failed;
+            }
+        }
+    }
+
     if (!request_mem_region(NV_PCI_RESOURCE_START(pci_dev, regs_bar_index),
                             NV_PCI_RESOURCE_SIZE(pci_dev, regs_bar_index),
                             nv_device_name))
@@ -2827,6 +2859,30 @@ nv_pci_error_detected(struct pci_dev *pci_dev, pci_channel_state_t state)
             pci_warn(pci_dev,
                      "AER: error_detected (state=%d) -> DISCONNECT\n",
                      (int)state);
+            /*
+             * v4 sink primitive: dispatch into the C5
+             * cleanupGpuLostStateAtomic via the new rm_ entry point so
+             * the RM-side PDB_PROP_GPU_IS_LOST marker is also set (the
+             * Linux-side pci_dev_is_disconnected marker is set by the
+             * kernel's own AER state machine on the DISCONNECT return
+             * path). The NV_GPU_LOST_DETECTOR_* macros mirror
+             * nv_gpu_lost_detector_t from
+             * src/nvidia/inc/kernel/gpu/nv-gpu-lost.h.
+             */
+            {
+                nv_linux_state_t *nvl = pci_get_drvdata(pci_dev);
+                if (nvl != NULL)
+                {
+                    nvidia_stack_t *aer_sp = NULL;
+                    if (nv_kmem_cache_alloc_stack(&aer_sp) == 0)
+                    {
+                        rm_cleanup_gpu_lost_state(aer_sp,
+                                                  NV_STATE_PTR(nvl),
+                                                  NV_GPU_LOST_DETECTOR_AER_FATAL);
+                        nv_kmem_cache_free_stack(aer_sp);
+                    }
+                }
+            }
             return PCI_ERS_RESULT_DISCONNECT;
     }
 }

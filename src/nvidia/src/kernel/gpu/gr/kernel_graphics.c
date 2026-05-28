@@ -2607,17 +2607,13 @@ void kgraphicsFreeGlobalCtxBuffers_IMPL
         NV_STATUS status;
         status = kmemsysCacheOp_HAL(pGpu, pKernelMemorySystem, NULL, FB_CACHE_VIDEO_MEMORY, FB_CACHE_EVICT);
         //
-        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST here.
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST here.
         // Cache evict against a GPU off the bus is host-side bookkeeping;
         // C5's _issueRpcAndWait short-circuit can legitimately return
         // GPU_IS_LOST during teardown so this assert must accept it.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired in favor of canonical
+        // sink-side log emitted by cleanupGpuLostStateAtomic.)
         //
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "kgraphicsFreeContextBuffers: cache evict returned "
-                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
-        }
         NV_ASSERT_OR_GPU_LOST(status);
     }
 }

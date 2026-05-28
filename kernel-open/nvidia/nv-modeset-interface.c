@@ -157,6 +157,7 @@ NV_STATUS nvidia_get_rm_ops(nvidia_modeset_rm_ops_t *rm_ops)
         .close_gpu      = nvidia_dev_put,
         .op             = rm_kernel_rmapi_op, /* provided by nv-kernel.o */
         .set_callbacks  = nvidia_modeset_set_callbacks,
+        .is_gpu_lost    = nvidia_dev_is_gpu_lost,
     };
 
     if (strcmp(rm_ops->version_string, NV_VERSION_STRING) != 0)

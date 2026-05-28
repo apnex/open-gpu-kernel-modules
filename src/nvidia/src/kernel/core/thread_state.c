@@ -41,6 +41,7 @@
 #include "nvrm_registry.h"
 #include "gpu_mgr/gpu_mgr.h"
 #include "gpu/gpu.h"
+#include "gpu/nv-gpu-lost.h"            // v4: NV_GPU_LOST_LOG_ONCE for G5 rate-limit
 #include "gpu/gpu_timeout.h"
 
 #include "virtualization/hypervisor/hypervisor.h"
@@ -407,7 +408,16 @@ static NV_STATUS _threadNodeCheckTimeout(OBJGPU *pGpu, THREAD_STATE_NODE *pThrea
     {
         if (!API_GPU_ATTACHED_SANITY_CHECK(pGpu))
         {
-            NV_PRINTF(LEVEL_ERROR, "API_GPU_ATTACHED_SANITY_CHECK failed!\n");
+            //
+            // v4 guard G5: rate-limit. Per #776, this hot caller fires
+            // 10x/sec under timeout-storm after the GPU goes off the
+            // bus, flooding dmesg without adding diagnostic value past
+            // the first line. NV_GPU_LOST_LOG_ONCE replaces the raw
+            // LEVEL_ERROR so the line lands once per kernel-module
+            // lifetime per call site.
+            //
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "_threadNodeCheckTimeout: API_GPU_ATTACHED_SANITY_CHECK failed\n");
             return NV_ERR_TIMEOUT;
         }
     }

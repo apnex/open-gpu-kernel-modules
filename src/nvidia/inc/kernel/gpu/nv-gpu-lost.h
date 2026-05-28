@@ -94,4 +94,44 @@
                              ((status) == NV_ERR_GPU_IN_FULLCHIP_RESET) ||     \
                              ((status) == NV_ERR_GPU_IS_LOST))
 
+/*
+ * v4 sink-primitive architecture: detector-class enum + cleanupGpuLostStateAtomic.
+ *
+ * The driver discovers a GPU is off the bus from multiple distinct input
+ * classes (post-MMIO-read sentinel, osHandleGpuLost retry-exhausted, GSP
+ * heartbeat timeout, AER fatal callback, Q-watchdog DMA wedge,
+ * probe-time BAR-allocation failure, kernel-side sysfs disconnect). v4
+ * routes every detection input through one idempotent per-GPU primitive
+ * so the dual markers (PDB_PROP_GPU_IS_LOST + pci_dev_is_disconnected)
+ * are always set together and one canonical log line records which
+ * input class fired.
+ *
+ * Reserved enum slot DETECTOR_UVM_FATAL is consumed by C6 (F1) in
+ * Phase 2; the slot is allocated here so Phase 1 vs Phase 2 don't
+ * collide on numeric values.
+ */
+typedef enum {
+    DETECTOR_MMIO_DEAD                       = 0,
+    DETECTOR_OSHANDLEGPULOST_RETRY_EXHAUSTED = 1,
+    DETECTOR_GSP_HEARTBEAT_TIMEOUT           = 2,
+    DETECTOR_AER_FATAL                       = 3,
+    DETECTOR_QWATCHDOG_DMA_WEDGE             = 4,
+    DETECTOR_PROBE_BAR_FAILURE               = 5,
+    DETECTOR_SYSFS_DISCONNECTED              = 6,
+    DETECTOR_UVM_FATAL                       = 7,   /* reserved for Phase 2 C6 */
+} nv_gpu_lost_detector_t;
+
+/*
+ * Atomic per-GPU sink-state setter. Idempotent; safe from any detection
+ * input. Sets PDB_PROP_GPU_IS_LOST (via gpuSetDisconnectedProperties)
+ * AND pci_dev_is_disconnected (via os_pci_set_disconnected). Emits one
+ * NV_PRINTF per detector_class per kernel module lifetime, naming which
+ * detector input observed the dead bus.
+ *
+ * Forward declaration of OBJGPU keeps this header self-contained.
+ */
+struct OBJGPU;
+void cleanupGpuLostStateAtomic(struct OBJGPU *pGpu,
+                               nv_gpu_lost_detector_t detector_class);
+
 #endif /* _NV_GPU_LOST_H_ */

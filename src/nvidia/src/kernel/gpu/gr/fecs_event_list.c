@@ -1621,13 +1621,9 @@ fecsBufferDisableHw
                              NV2080_CTRL_CMD_INTERNAL_GR_GET_FECS_TRACE_HW_ENABLE,
                              &getHwEnableParams,
                              sizeof(getHwEnableParams));
-    // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST.
-    if (status == NV_ERR_GPU_IS_LOST)
-    {
-        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-            "fecsBufferDisableHw: GET_FECS_TRACE_HW_ENABLE returned "
-            "NV_ERR_GPU_IS_LOST, returning early\n");
-    }
+    // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST.
+    // (v3 per-site NV_GPU_LOST_LOG_ONCE retired in favor of canonical
+    // sink-side log emitted by cleanupGpuLostStateAtomic.)
     NV_ASSERT_OR_GPU_LOST_OR_RETURN_VOID(status);
     if (status == NV_ERR_GPU_IN_FULLCHIP_RESET)
         return;
@@ -1644,13 +1640,8 @@ fecsBufferDisableHw
                                  NV2080_CTRL_CMD_INTERNAL_GR_SET_FECS_TRACE_HW_ENABLE,
                                  &setHwEnableParams,
                                  sizeof(setHwEnableParams));
-        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST.
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "fecsBufferDisableHw: SET_FECS_TRACE_HW_ENABLE returned "
-                "NV_ERR_GPU_IS_LOST, returning early\n");
-        }
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired.)
         NV_ASSERT_OR_GPU_LOST_OR_RETURN_VOID(status);
     }
 }

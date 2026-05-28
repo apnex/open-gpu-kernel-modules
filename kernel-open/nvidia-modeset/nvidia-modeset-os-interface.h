@@ -309,6 +309,15 @@ void* nvkms_get_per_open_data(int fd);
 NvBool nvkms_open_gpu(NvU32 gpuId, NvBool reset_aware);
 void nvkms_close_gpu(NvU32 gpuId, NvBool reset_aware);
 
+/*!
+ * v4 guard G10 support: lock-free query of the Linux-side dead-bus
+ * marker for the given gpuId. Returns NV_TRUE iff the underlying PCI
+ * device has been marked permanently disconnected. Used by nvidia-drm
+ * via the NvKmsKapi isGpuLost entry to short-circuit hardware-touching
+ * teardown when the GPU has gone off the bus.
+ */
+NvBool nvkms_is_gpu_lost(NvU32 gpuId);
+
 
 /*!
  * Enumerate nvidia gpus.

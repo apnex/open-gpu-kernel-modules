@@ -571,13 +571,8 @@ skip_destroy:
     if ((IS_VIRTUAL(pGpu) || IS_GSP_CLIENT(pGpu)) && !bBar1VA && !bFlaVA)
     {
         NV_RM_RPC_FREE(pGpu, hClient, hParent, hVASpace, status);
-        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST during teardown.
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "vaspaceapiDestruct: RPC_FREE returned "
-                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
-        }
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST during teardown.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired.)
         NV_ASSERT_OR_GPU_LOST(status);
     }
 

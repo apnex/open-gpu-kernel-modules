@@ -634,13 +634,9 @@ kgspTeardown_TU102
 
         // Reset GSP so we can load FWSEC-SB
         status = kflcnReset_HAL(pGpu, staticCast(pKernelGsp, KernelFalcon));
-        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST.
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "kgspUnloadRm_TU102: kflcnReset returned "
-                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
-        }
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired in favor of canonical
+        // sink-side log emitted by cleanupGpuLostStateAtomic.)
         NV_ASSERT_OR_GPU_LOST(status);
 
         // Invoke FWSEC-SB to put back PreOsApps during driver unload

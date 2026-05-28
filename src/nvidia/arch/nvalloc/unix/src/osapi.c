@@ -32,6 +32,7 @@
 #include <class/cl0000.h>
 #include <rmosxfac.h> // Declares RmInitRm().
 #include "gpu/gpu.h"
+#include "gpu/nv-gpu-lost.h"            // v4 sink primitive + DETECTOR_* enum
 #include "gps.h"
 #include <platform/chipset/chipset.h>
 
@@ -400,6 +401,35 @@ void
 RmLogGpuCrash(OBJGPU *pGpu)
 {
     NvBool bGpuIsLost, bGpuIsConnected;
+
+    //
+    // v4 guard G6: extend the existing rcdbAddRmGpuDump sink-check up
+    // to RmLogGpuCrash. Per issue #461, the crash-dump path itself
+    // issues GSP RPCs (e.g. DUMP_PROTOBUF_COMPONENT function 78); when
+    // the GPU is off the bus those RPCs cost the full timeout per
+    // call, with the GPU lock held. Short-circuit at RmLogGpuCrash
+    // entry on a confirmed-lost GPU so the cascade does not start.
+    //
+    // The check is positive-evidence: if the kernel-PCI marker is set
+    // (os_pci_is_disconnected) AND the RM marker is set
+    // (PDB_PROP_GPU_IS_LOST), the GPU is definitively gone and there
+    // is nothing useful to collect via RPC. Note that this function
+    // contains its own re-evaluation logic below that can clear those
+    // markers on EEH recovery; we deliberately gate BEFORE that to
+    // catch the wedge-cleanup path that #461 describes (where re-eval
+    // would also confirm lost).
+    //
+    {
+        nv_state_t *nv = NV_GET_NV_STATE(pGpu);
+        if (nv != NULL && os_pci_is_disconnected(nv->handle) &&
+            pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        {
+            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
+                "RmLogGpuCrash: GPU lost, skipping crash log to avoid "
+                "diagnostic-RPC cascade\n");
+            return;
+        }
+    }
 
     //
     // Re-evaluate whether or not the GPU is accessible. This could be called
@@ -1834,6 +1864,69 @@ void NV_API_CALL rm_shutdown_adapter(
 
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
     NV_EXIT_RM_RUNTIME(sp,fp);
+}
+
+/*
+ * v4 cross-module dispatch: kernel-open AER callbacks observe a
+ * surprise-removal event at the Linux PCI layer (struct pci_dev *)
+ * but cannot reach OBJGPU directly. This wrapper resolves OBJGPU from
+ * nv_state_t and dispatches into the C5 sink primitive
+ * (cleanupGpuLostStateAtomic).
+ *
+ * The detector_class is NvU32 across the API boundary (the
+ * nv_gpu_lost_detector_t enum is not visible from kernel-open/common);
+ * callers pass DETECTOR_* values cast to NvU32 and the implementation
+ * casts back.
+ *
+ * Locking: best-effort API lock acquisition. The AER callback runs
+ * from the PCIe error-recovery workqueue (process context, not atomic).
+ * If the API lock is contended (concurrent RM teardown in progress),
+ * the primitive's sink-state will be reached by other detector inputs
+ * (next MMIO read fires DETECTOR_MMIO_DEAD via the post-read funnel)
+ * so the AER path's contribution is opportunistic, not required for
+ * correctness.
+ */
+void NV_API_CALL rm_cleanup_gpu_lost_state(
+    nvidia_stack_t *sp,
+    nv_state_t     *pNv,
+    NvU32           detector_class
+)
+{
+    THREAD_STATE_NODE threadState;
+    void  *fp;
+    OBJGPU *pGpu;
+
+    if (pNv == NULL)
+        return;
+
+    NV_ENTER_RM_RUNTIME(sp, fp);
+    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
+
+    // Best-effort API lock; skip the RM-side marker set if contended.
+    if (rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_DESTROY) == NV_OK)
+    {
+        pGpu = NV_GET_NV_PRIV_PGPU(pNv);
+        if (pGpu != NULL)
+        {
+            cleanupGpuLostStateAtomic(pGpu,
+                (nv_gpu_lost_detector_t)detector_class);
+        }
+        rmapiLockRelease();
+    }
+    else
+    {
+        // Best-effort: the Linux marker will be set by the kernel's
+        // AER DISCONNECT return path regardless; subsequent MMIO reads
+        // will converge on the sink via DETECTOR_MMIO_DEAD.
+        NV_PRINTF(LEVEL_WARNING,
+            "rm_cleanup_gpu_lost_state: API lock contended, deferring "
+            "sink-state RM-marker set; Linux marker will still be set "
+            "by AER DISCONNECT return path (detector_class=%u)\n",
+            detector_class);
+    }
+
+    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+    NV_EXIT_RM_RUNTIME(sp, fp);
 }
 
 NV_STATUS NV_API_CALL rm_exclude_adapter(

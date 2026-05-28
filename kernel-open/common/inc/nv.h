@@ -642,6 +642,18 @@ typedef struct nv_state_t
     /* Bool to check if power management is supported */
     NvBool is_pm_unsupported;
 
+    /*
+     * Per-GPU bitmap of which detector classes have already emitted their
+     * "GPU lost via detector_class=N" log line. Set by
+     * cleanupGpuLostStateAtomic() (src/nvidia/arch/nvalloc/unix/src/os.c)
+     * so the log is emitted exactly once per (gpu, detector_class), not
+     * once per detector_class across all GPUs. One bit per detector
+     * (DETECTOR_MMIO_DEAD .. DETECTOR_UVM_FATAL, currently 8 entries in
+     * src/nvidia/inc/kernel/gpu/nv-gpu-lost.h); NvU8 has headroom for the
+     * full enum.
+     */
+    NvU8 gpu_lost_detector_logged;
+
 } nv_state_t;
 
 #define NVFP_TYPE_NONE       ((NvU32)0x0)
@@ -1163,6 +1175,22 @@ void       NV_API_CALL  rm_free_private_state    (nvidia_stack_t *, nv_state_t *
 NvBool     NV_API_CALL  rm_init_adapter          (nvidia_stack_t *, nv_state_t *);
 void       NV_API_CALL  rm_disable_adapter       (nvidia_stack_t *, nv_state_t *);
 void       NV_API_CALL  rm_shutdown_adapter      (nvidia_stack_t *, nv_state_t *);
+/*
+ * nv_gpu_lost_detector_t mirror -- kept in sync with
+ * src/nvidia/inc/kernel/gpu/nv-gpu-lost.h. The enum lives in the RM tree
+ * which kernel-open .c files cannot include directly, so we mirror the
+ * numeric values here for the rm_cleanup_gpu_lost_state callers.
+ */
+#define NV_GPU_LOST_DETECTOR_MMIO_DEAD                       0
+#define NV_GPU_LOST_DETECTOR_OSHANDLEGPULOST_RETRY_EXHAUSTED 1
+#define NV_GPU_LOST_DETECTOR_GSP_HEARTBEAT_TIMEOUT           2
+#define NV_GPU_LOST_DETECTOR_AER_FATAL                       3
+#define NV_GPU_LOST_DETECTOR_QWATCHDOG_DMA_WEDGE             4
+#define NV_GPU_LOST_DETECTOR_PROBE_BAR_FAILURE               5
+#define NV_GPU_LOST_DETECTOR_SYSFS_DISCONNECTED              6
+#define NV_GPU_LOST_DETECTOR_UVM_FATAL                       7
+
+void       NV_API_CALL  rm_cleanup_gpu_lost_state(nvidia_stack_t *, nv_state_t *, NvU32 /* detector_class */);
 NV_STATUS  NV_API_CALL  rm_exclude_adapter       (nvidia_stack_t *, nv_state_t *);
 NV_STATUS  NV_API_CALL  rm_acquire_api_lock      (nvidia_stack_t *);
 NV_STATUS  NV_API_CALL  rm_release_api_lock      (nvidia_stack_t *);

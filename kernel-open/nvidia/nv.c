@@ -5356,7 +5356,19 @@ int nvidia_dev_get(NvU32 gpu_id, nvidia_stack_t *sp, NvBool reset_aware)
 
     if (rc == 0 && !reset_aware)
     {
-        WARN_ON(rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_TRUE) != NV_OK);
+        //
+        // v4 guard G7: tolerate NV_ERR_GPU_IS_LOST.
+        //
+        // Per #916, when a userspace process crashes on a lost GPU the
+        // refcount-management path returns NV_ERR_GPU_IS_LOST and the
+        // raw WARN_ON dumps a stack trace per close. Since the sink
+        // primitive has already logged the GPU-lost event canonically,
+        // suppress the WARN on IS_LOST and treat it as a benign cleanup
+        // path. Non-IS_LOST errors retain the original WARN behavior.
+        //
+        NV_STATUS s = rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_TRUE);
+        if (s != NV_OK && s != NV_ERR_GPU_IS_LOST)
+            WARN_ON(1);
     }
 
     up(&nvl->ldata_lock);
@@ -5381,10 +5393,52 @@ void nvidia_dev_put(NvU32 gpu_id, nvidia_stack_t *sp, NvBool reset_aware)
 
     if (!reset_aware)
     {
-        WARN_ON(rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_FALSE) != NV_OK);
+        // v4 guard G7: tolerate IS_LOST on close-path refcount drop (see above).
+        NV_STATUS s = rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_FALSE);
+        if (s != NV_OK && s != NV_ERR_GPU_IS_LOST)
+            WARN_ON(1);
     }
 
     up(&nvl->ldata_lock);
+}
+
+/*
+ * v4 guard G10 support: lock-free query of the Linux-side dead-bus marker
+ * for use by external modules (nvidia-modeset.ko / nvidia-drm.ko via the
+ * nvidia_modeset_rm_ops_t jump table -> NvKmsKapi isGpuLost).
+ *
+ * Queries os_pci_is_disconnected on the underlying pci_dev. This is the
+ * Linux-marker half of the C5 v4 dual-marker sink state; either marker
+ * being set is sufficient to indicate the GPU is off the bus (the sink
+ * primitive cleanupGpuLostStateAtomic sets both atomically). Reading the
+ * Linux marker avoids needing the RM API lock, which makes the query
+ * safe from any context including the nvidia-drm remove path that may
+ * be racing concurrent teardown.
+ *
+ * Returns NV_FALSE if the gpu_id is unknown (fail-safe -- "assume alive
+ * if we can't tell"). The caller (nv_drm_remove) interprets NV_FALSE as
+ * "proceed with normal teardown".
+ *
+ * Locking: takes nvl->ldata_lock briefly (via find_gpu_id), then
+ * releases it; the underlying os_pci_is_disconnected read is itself
+ * lock-free (Linux pci_dev_is_disconnected is a sink-state READ_ONCE).
+ */
+NvBool nvidia_dev_is_gpu_lost(NvU32 gpu_id)
+{
+    nv_linux_state_t *nvl;
+    nv_state_t *nv;
+    NvBool isLost;
+
+    /* Takes nvl->ldata_lock */
+    nvl = find_gpu_id(gpu_id);
+    if (!nvl)
+        return NV_FALSE;
+
+    nv = NV_STATE_PTR(nvl);
+    isLost = os_pci_is_disconnected(nv->handle);
+
+    up(&nvl->ldata_lock);
+    return isLost;
 }
 
 /*
@@ -5430,8 +5484,12 @@ int nvidia_dev_get_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
 
     if (nvl)
     {
+        // v4 guard G7: tolerate IS_LOST on UUID-based dev_get refcount (#916).
+        NV_STATUS s;
         rc = 0;
-        WARN_ON(rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_TRUE) != NV_OK);
+        s = rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_TRUE);
+        if (s != NV_OK && s != NV_ERR_GPU_IS_LOST)
+            WARN_ON(1);
     }
     else
         rc = -ENODEV;
@@ -5458,7 +5516,12 @@ void nvidia_dev_put_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
 
     nv_close_device(NV_STATE_PTR(nvl), sp);
 
-    WARN_ON(rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_FALSE) != NV_OK);
+    {
+        // v4 guard G7: tolerate IS_LOST on UUID-based dev_put refcount (#916).
+        NV_STATUS s = rm_set_external_kernel_client_count(sp, NV_STATE_PTR(nvl), NV_FALSE);
+        if (s != NV_OK && s != NV_ERR_GPU_IS_LOST)
+            WARN_ON(1);
+    }
 
     up(&nvl->ldata_lock);
 }

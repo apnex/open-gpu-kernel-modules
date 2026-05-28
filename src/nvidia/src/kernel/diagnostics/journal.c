@@ -2933,8 +2933,7 @@ rcdbAddRmGpuDump
     //
     if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
     {
-        NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                             "rcdbAddRmGpuDump: GPU lost, skipping crash dump\n");
+        // C5 v4: per-site log retired; canonical sink log fired at detection.
         return NV_OK;
     }
 

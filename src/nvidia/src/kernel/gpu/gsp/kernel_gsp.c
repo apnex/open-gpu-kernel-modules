@@ -24,6 +24,7 @@
 #include "resserv/rs_server.h"
 
 #include "gpu/gsp/kernel_gsp.h"
+#include "gpu/nv-gpu-lost.h"            // v4 sink primitive + DETECTOR_* enum
 #include "gpu/falcon/kernel_falcon.h"
 
 #include "kernel/core/thread_state.h"
@@ -2792,6 +2793,34 @@ _kgspRpcRecvPoll
 
     gpuSetTimeout(pGpu, timeoutUs, &timeout, timeoutFlags);
 
+    //
+    // v4 guard G8 (medium-confidence): pre-loop sink + bFatalError check.
+    //
+    // Under issue #1134, after a GSP fatal-error has set bFatalError =
+    // NV_TRUE (or a separate detector has set the sink), each
+    // _kgspRpcRecvPoll call still spends up to 75s holding the GPU
+    // lock waiting for the timeout. A userspace ioctl-storm during
+    // teardown of the lost GPU multiplies that into a long lock-hold
+    // cascade that wedges nvidia_drm teardown. Short-circuit BEFORE
+    // the for-loop so fatal-error RPCs return in microseconds with
+    // NV_ERR_RESET_REQUIRED, letting cleanup paths drain quickly.
+    //
+    // Validation gate: E07 Run 4 + power-off wedge regression tests
+    // (Phase 1 plan Task 4A/4B). If lock-hold cascade is still
+    // observable after deploy, the hypothesis needs revision per the
+    // architecture doc's "Open questions" item 9.
+    //
+    if (pKernelGsp->bFatalError ||
+        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    {
+        /* The pre-loop short-circuit skips the done: label cleanup, so clear
+         * bPollingForRpcResponse here -- otherwise the next entrant to
+         * _kgspRpcRecvPoll would trip NV_ASSERT_OR_RETURN(!bPollingForRpcResponse)
+         * at the setter a few lines above. */
+        pKernelGsp->bPollingForRpcResponse = NV_FALSE;
+        return NV_ERR_RESET_REQUIRED;
+    }
+
     for (;;)
     {
         //
@@ -2882,6 +2911,23 @@ _kgspRpcRecvPoll
             if (bIsFatalTimeout && pKernelGsp->gspStallDetection == NV_REG_STR_RM_GSP_STALL_DETECTION_ENABLE)
             {
                 _kgspHandleFatalTimeout(pGpu, pKernelGsp, errorNum);
+            }
+
+            //
+            // v4 detector [c]: GSP heartbeat fatal timeout.
+            //
+            // The GSP firmware has stopped responding for a sustained
+            // period; the device is effectively wedged regardless of
+            // whether the underlying PCIe link is still up. Route
+            // through the sink primitive so the dual markers are set
+            // atomically and one canonical log line records the
+            // detector class. Other detectors (MMIO read, AER) may
+            // also fire; the primitive is idempotent so re-entry is
+            // a no-op.
+            //
+            if (bIsFatalTimeout)
+            {
+                cleanupGpuLostStateAtomic(pGpu, DETECTOR_GSP_HEARTBEAT_TIMEOUT);
             }
 
             goto done;

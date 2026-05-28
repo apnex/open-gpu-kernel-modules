@@ -42,6 +42,7 @@
 #include <core/system.h>
 #include <os/os.h>
 #include "gpu/gpu.h"
+#include "gpu/nv-gpu-lost.h"            // v4: cleanupGpuLostStateAtomic + DETECTOR_* enum
 #include <gpu/timer/objtmr.h>
 #include "gpu/bus/kern_bus.h"
 #include "nverror.h"
@@ -417,27 +418,28 @@ osHandleGpuLost
                           pGpu->boardInfo->serialNumber);
         }
 
-        gpuSetDisconnectedProperties(pGpu);
-
         //
-        // Cross-layer disconnect propagation (C5 v3): also set the
-        // Linux-level pci_dev_is_disconnected marker so it stays
-        // consistent with the RM-level PDB_PROP_GPU_IS_LOST property
-        // just set by gpuSetDisconnectedProperties(). Without this,
-        // any code path that consults pci_dev_is_disconnected() (e.g.
-        // Linux PCI subsystem internals, AER state machine) observes
-        // a different answer than RM-side checks do, leaving the two
-        // state systems inconsistent during teardown.
+        // Cross-layer disconnect propagation (C5 v4 sink primitive):
+        // route through cleanupGpuLostStateAtomic so the dual markers
+        // (RM PDB_PROP_GPU_IS_LOST + Linux pci_dev_is_disconnected) are
+        // set together via the canonical idempotent path. The v4 sink
+        // primitive replaces the v3 pair of direct
+        // gpuSetDisconnectedProperties + os_pci_set_disconnected calls
+        // so every detection input now converges on one state
+        // transition with one canonical per-detector-class log line.
         //
-        // Before this line was added, the propagation only fired from
-        // osDevReadReg032's post-read check (added by v1 C5). When
-        // osHandleGpuLost was the detection path -- typical for
-        // ioctl/RPC-driven discovery rather than direct MMIO reads --
-        // osIsGpuBusDead() would short-circuit subsequent reads BEFORE
-        // the post-read check could run, leaving os_pci_set_disconnected
-        // uncalled. MISSION-1 E07 Run 2 (2026-05-26) surfaced the gap.
+        // The original v3 commentary explained WHY the Linux marker
+        // also needs to be set here (osIsGpuBusDead short-circuits
+        // subsequent reads before the post-read check can run, so the
+        // post-read-check site cannot be the only detection site);
+        // that reasoning is preserved by the v4 primitive doing both
+        // setter calls atomically.
         //
-        os_pci_set_disconnected(nv->handle);
+        // DETECTOR_OSHANDLEGPULOST_RETRY_EXHAUSTED tags this input
+        // class so the canonical log distinguishes it from the MMIO
+        // post-read detector (DETECTOR_MMIO_DEAD).
+        //
+        cleanupGpuLostStateAtomic(pGpu, DETECTOR_OSHANDLEGPULOST_RETRY_EXHAUSTED);
 
         if (IS_GSP_CLIENT(pGpu))
         {

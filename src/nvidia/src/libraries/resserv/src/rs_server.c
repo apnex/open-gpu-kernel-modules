@@ -1385,14 +1385,9 @@ serverFreeResourceTree
         freeParams.bInvalidateOnly = bInvalidateOnly;
         freeParams.pSecInfo = pParams->pSecInfo;
         status = serverFreeResourceTreeUnderLock(pServer, &freeParams);
-        // Crash-safety guard (C5 v3, third site in rs_server.c missed by v1):
-        // tolerate NV_ERR_GPU_IS_LOST during recursive free.
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "serverFreeResourceList: serverFreeResourceTreeUnderLock "
-                "returned NV_ERR_GPU_IS_LOST, continuing cleanup\n");
-        }
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST during recursive free.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired; canonical site log lives in
+        // serverFreeResourceTreeUnderLock at line 268 of this file.)
         NV_ASSERT_OR_GPU_LOST(status);
 
         if (pServer->bDebugFreeList)

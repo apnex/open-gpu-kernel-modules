@@ -33,6 +33,7 @@
 --undefined=rm_run_nano_timer_callback
 --undefined=rm_save_low_res_mode
 --undefined=rm_shutdown_adapter
+--undefined=rm_cleanup_gpu_lost_state
 --undefined=rm_exclude_adapter
 --undefined=rm_acquire_api_lock
 --undefined=rm_release_api_lock

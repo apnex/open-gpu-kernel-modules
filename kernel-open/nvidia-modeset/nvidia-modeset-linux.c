@@ -1200,6 +1200,22 @@ void nvkms_close_gpu(NvU32 gpuId, NvBool reset_aware)
     __rm_ops.free_stack(stack);
 }
 
+/*
+ * v4 guard G10 support: thin wrapper around the nvidia.ko-side
+ * is_gpu_lost jump-table entry. Returns NV_FALSE if the jump-table
+ * field is unpopulated (older nvidia.ko + newer nvidia-modeset.ko --
+ * fail-safe: assume alive). Caller-side semantics: NV_TRUE means the
+ * Linux PCI device has been marked permanently disconnected and any
+ * hardware-touching teardown step should be skipped.
+ */
+NvBool nvkms_is_gpu_lost(NvU32 gpuId)
+{
+    if (__rm_ops.is_gpu_lost == NULL) {
+        return NV_FALSE;
+    }
+    return __rm_ops.is_gpu_lost(gpuId);
+}
+
 NvU32 nvkms_enumerate_gpus(nv_gpu_info_t *gpu_info)
 {
     return __rm_ops.enumerate_gpus(gpu_info);

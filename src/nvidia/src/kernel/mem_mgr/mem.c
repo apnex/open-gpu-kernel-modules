@@ -176,13 +176,8 @@ memDestruct_IMPL
     if (pMemory->bRpcAlloc && (IS_VIRTUAL(pGpu) || IS_FW_CLIENT(pGpu)))
     {
         NV_RM_RPC_FREE(pGpu, hClient, hParent, hMemory, status);
-        // Crash-safety guard (C5 v3): tolerate NV_ERR_GPU_IS_LOST during teardown.
-        if (status == NV_ERR_GPU_IS_LOST)
-        {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "memDestructCommon: RPC_FREE returned "
-                "NV_ERR_GPU_IS_LOST, continuing teardown\n");
-        }
+        // Crash-safety guard (C5 v4): tolerate NV_ERR_GPU_IS_LOST during teardown.
+        // (v3 per-site NV_GPU_LOST_LOG_ONCE retired.)
         NV_ASSERT_OR_GPU_LOST(status);
     }
 }

@@ -282,8 +282,9 @@ nvdDumpAllEngines_IMPL
         if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ||
             pGpu->getProperty(pGpu, PDB_PROP_GPU_INACCESSIBLE))
         {
-            NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
-                "nvdDumpAllEngines: GPU lost or inaccessible, skipping remaining engine dumps\n");
+            // C5 v4: per-site log retired; canonical sink log already
+            // fired in cleanupGpuLostStateAtomic for the detector that
+            // set PDB_PROP_GPU_IS_LOST.
             pNvDumpState->bGpuAccessible = NV_FALSE;
             break;
         }
