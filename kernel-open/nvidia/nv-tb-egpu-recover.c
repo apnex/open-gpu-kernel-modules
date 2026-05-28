@@ -225,6 +225,36 @@ enum tb_egpu_recover_gate tb_egpu_recover_pre_schedule_gates(
         return TB_EGPU_RECOVER_GATE_DISABLED;
     }
 
+    /*
+     * A3 v4 sink-query early-surrender: if the C5 sink primitive has
+     * already declared the GPU lost (via DETECTOR_MMIO_DEAD,
+     * DETECTOR_AER_FATAL, DETECTOR_GSP_HEARTBEAT_TIMEOUT,
+     * DETECTOR_QWATCHDOG_DMA_WEDGE, or any other detector class),
+     * surrender immediately without consuming retry budget. Fast-path:
+     * avoids attempting a recovery that is doomed to fail because the
+     * GPU is unreachable.
+     *
+     * Probes pci_channel_io_perm_failure via os_pci_is_disconnected —
+     * the Linux-side marker the C5 sink primitive sets. The RM-side
+     * marker (PDB_PROP_GPU_IS_LOST) lives behind the RM API lock and
+     * is NOT queried here, to keep this entry point lock-free at the
+     * AER err_handler / kthread call sites where pre_schedule_gates
+     * may be invoked.
+     *
+     * Sequenced BEFORE attempt_count increment so retry budget is not
+     * consumed; surrender_count is still bumped and PERMANENT_FAIL is
+     * emitted to keep telemetry consistent with the H1-exhaust
+     * GATE_SURRENDER path.
+     */
+    if (pdev != NULL && os_pci_is_disconnected(pdev) == NV_TRUE)
+    {
+        atomic_inc(&st->surrender_count);
+        tb_egpu_recover_emit_uevent(pdev, "PERMANENT_FAIL");
+        if (reason_out)
+            *reason_out = "sink-set: GPU already declared lost (C5 sink)";
+        return TB_EGPU_RECOVER_GATE_SURRENDER;
+    }
+
     /* H1 burst boundary — idle long enough to start a fresh burst. */
     if (st->last_fire_jiffies != 0 &&
         time_after(jiffies,
