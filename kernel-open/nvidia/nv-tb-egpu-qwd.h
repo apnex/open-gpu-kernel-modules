@@ -6,11 +6,16 @@
  *
  * Per-device kthread that probes NV_PMC_BOOT_0 via direct volatile MMIO
  * on a fixed interval. On a dead-bus return (0xFFFFFFFF), declares the
- * GPU disconnected through os_pci_set_disconnected — the same kernel
- * propagation Q-active uses from the ioctl path, but driven by an
- * active heartbeat that fires regardless of which subsystem caused the
- * wedge. Closes the DMA-path Mode B detection gap that Q-active alone
- * misses; see docs/lever-catalog.md (Lever Q) for the full taxonomy.
+ * GPU disconnected by dispatching into the C5 sink primitive
+ * cleanupGpuLostStateAtomic (via the kernel-open wrapper
+ * rm_cleanup_gpu_lost_state) with detector class
+ * NV_GPU_LOST_DETECTOR_QWATCHDOG_DMA_WEDGE. The primitive sets BOTH the
+ * RM-side PDB_PROP_GPU_IS_LOST marker AND the Linux-side
+ * pci_channel_io_perm_failure marker atomically, providing the same
+ * Q-passive short-circuit Q-active triggers from the ioctl path plus
+ * the RM-side disconnect markers that other RM state machines key on.
+ * Closes the DMA-path Mode B detection gap that Q-active alone misses;
+ * see docs/lever-catalog.md (Lever Q) for the full taxonomy.
  *
  * Public surface (per device, via PCI sysfs):
  *

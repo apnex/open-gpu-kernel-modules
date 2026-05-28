@@ -6,9 +6,12 @@
  *
  * Per-device kthread that periodically reads NV_PMC_BOOT_0 (offset 0 of
  * BAR0) via direct volatile MMIO. On 0xFFFFFFFF, declares the GPU
- * disconnected via os_pci_set_disconnected — same kernel-side
- * propagation as Q-active, but driven by an active heartbeat rather
- * than waiting for an ioctl-path MMIO read.
+ * disconnected by dispatching into the C5 sink primitive
+ * cleanupGpuLostStateAtomic via the rm_cleanup_gpu_lost_state wrapper
+ * with detector class NV_GPU_LOST_DETECTOR_QWATCHDOG_DMA_WEDGE. The
+ * primitive sets BOTH the RM-side PDB_PROP_GPU_IS_LOST marker AND the
+ * Linux-side pci_channel_io_perm_failure marker atomically and emits a
+ * single canonical telemetry log line.
  *
  * Why an active probe: the 2026-05-05 Mode B silent freeze
  * (loop-2026-05-05-165029) wedged in the DMA-upload path (model load
@@ -17,11 +20,17 @@
  * ~NVreg_TbEgpuQwdIntervalMs of failure regardless of which subsystem
  * stalled.
  *
+ * v4 SEMANTICS CHANGE: pre-v4, Q-watchdog called os_pci_set_disconnected
+ * directly, setting only the Linux-side marker. v4 routes through the
+ * C5 sink primitive so BOTH markers are set. Downstream UVM consumers
+ * and other RM state machines that previously observed only the Linux
+ * marker now observe both. See docs/patch-intents/A2-bus-loss-watchdog.md.
+ *
  * Scope (v1):
  *   - Active heartbeat at fixed interval (default 200 ms)
- *   - On dead-bus detection: log marker, increment counter, mark
- *     disconnected via os_pci_set_disconnected — Q-passive then
- *     short-circuits all subsequent osDevReadReg* calls
+ *   - On dead-bus detection: log marker, increment counter, dispatch
+ *     into the C5 sink primitive — both markers are set atomically and
+ *     Q-passive then short-circuits all subsequent osDevReadReg* calls
  *   - Per-device counters (cycles, detections) for A/B characterisation
  *   - Persistent S3 detection state (jiffies, pmc_boot_0, AER snapshot)
  *     exposed via sysfs for cross-boot post-mortems
@@ -39,7 +48,8 @@
  *   L1 (NVIDIA fork) — justified because the kthread needs:
  *     - access to nv_state_t internals (regs->map)
  *     - lifecycle binding to nvidia.ko probe/remove
- *     - call into os_pci_set_disconnected (project-added kernel-open API)
+ *     - call into rm_cleanup_gpu_lost_state (project-added kernel-open
+ *       wrapper for the C5 cleanupGpuLostStateAtomic sink primitive)
  *
  * Heisenbug acknowledgement (per memory feedback_observability_perturbs_bug):
  *   A 5 Hz active MMIO read is more perturbing than passive bpftrace.
@@ -171,13 +181,18 @@ static int tb_egpu_qwd_thread(void *data)
 
             if (!detected_logged)
             {
+                nvidia_stack_t *qwd_sp = NULL;
+
                 detected_logged = 1;
                 NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
                     "tb_egpu: qwd DETECTED dead bus "
                     "(PMC_BOOT_0=0x%08x after %d cycles).\n"
-                    "  action: os_pci_set_disconnected called; "
-                    "subsequent ioctl-path MMIO reads will short-circuit "
-                    "via Q-passive.\n",
+                    "  action: dispatching into C5 sink primitive "
+                    "(detector=QWATCHDOG_DMA_WEDGE); BOTH the RM-side "
+                    "PDB_PROP_GPU_IS_LOST marker and the Linux-side "
+                    "pci_channel_io_perm_failure marker will be set "
+                    "atomically; subsequent ioctl-path MMIO reads will "
+                    "short-circuit via Q-passive.\n",
                     boot_0, atomic_read(&qwd->cycles));
 
                 /*
@@ -190,12 +205,52 @@ static int tb_egpu_qwd_thread(void *data)
                 qwd->last_pmc_boot_0        = boot_0;
                 tb_egpu_dump_aer_trigger_event(nvl->pci_dev, "qwd-detect",
                                                &qwd->last_aer);
-            }
 
-            os_pci_set_disconnected(nv->handle);
+                /*
+                 * v4 sink dispatch: route through the C5 primitive so
+                 * BOTH markers are set atomically and the canonical
+                 * telemetry line is emitted once per episode. Pre-v4
+                 * called os_pci_set_disconnected directly (Linux marker
+                 * only); the SEMANTICS CHANGE is the addition of the
+                 * RM-side PDB_PROP_GPU_IS_LOST marker via the primitive.
+                 * The detector_class macro mirrors nv_gpu_lost_detector_t
+                 * from src/nvidia/inc/kernel/gpu/nv-gpu-lost.h.
+                 *
+                 * Sleepable kthread context — nv_kmem_cache_alloc_stack
+                 * is safe here (we just woke from msleep_interruptible).
+                 * Stack-alloc failure: detected_logged is already 1
+                 * (set above before the alloc), so this kthread will
+                 * NOT re-attempt the sink dispatch on subsequent
+                 * cycles for this episode. Detection counters still
+                 * tick and the verbose log already emitted, but the
+                 * sink dispatch is dropped. This is acceptable under
+                 * extreme memory pressure: the close-path and AER
+                 * detectors are independent dispatch sources for the
+                 * same fatal-state transition, so the dual-marker
+                 * set will still occur via one of those paths.
+                 */
+                if (nv_kmem_cache_alloc_stack(&qwd_sp) == 0)
+                {
+                    rm_cleanup_gpu_lost_state(qwd_sp, nv,
+                        NV_GPU_LOST_DETECTOR_QWATCHDOG_DMA_WEDGE);
+                    nv_kmem_cache_free_stack(qwd_sp);
+                }
+                else
+                {
+                    NV_DEV_PRINTF(NV_DBG_ERRORS, nv,
+                        "tb_egpu: qwd stack-alloc failed; sink dispatch "
+                        "deferred to next probe cycle\n");
+                    /* Allow re-log + retry next cycle. */
+                    detected_logged = 0;
+                }
+            }
             /*
              * Keep looping: counters keep ticking; if the disconnect
-             * ever clears we'll re-fire and re-log.
+             * ever clears we'll re-fire and re-log. The sink primitive
+             * itself is idempotent under the both-markers-set guard
+             * inside cleanupGpuLostStateAtomic, so even if a future
+             * probe re-enters here (e.g. detected_logged latch reset)
+             * the second dispatch is a no-op.
              */
         }
         else
