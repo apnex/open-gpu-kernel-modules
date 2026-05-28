@@ -31,6 +31,17 @@
  * walk) is intentionally absent — investigation-grade and resolved to
  * the dissolved P6 DIAG surface.
  *
+ * MISSION-1 v4 relationship to C5's canonical sink-side log
+ * (cascade-class-design-v4.md): C5's cleanupGpuLostStateAtomic primitive
+ * is the single source of truth for "GPU N was just classified lost via
+ * detector class X".  A4's lines here are the ORTHOGONAL close-path
+ * nominal observability ("did the close path execute, and what was the
+ * hardware state at last-close?") and MUST NOT duplicate the "GPU lost"
+ * marker.  v1's format strings already satisfy this by construction;
+ * future additions to this file MUST preserve the non-duplication
+ * invariant — add only the site-attributed state-delta payload, never
+ * the basic "GPU N lost" line.
+ *
  * pdev lookup: tb_egpu_get_gpu_pdev walks nv_linux_devices inside
  * nvidia.ko and returns the first NVIDIA pdev with refcount incremented.
  * Replaces the legacy hardcoded
