@@ -29,6 +29,7 @@
 #include "nv-reg.h"
 #include "nv-tb-egpu-qwd.h"      /* tb_egpu Q-watchdog (addon A2) */
 #include "nv-tb-egpu-recover.h"  /* tb_egpu recovery state machine (addon A3) */
+#include "nv-tb-egpu-metrics.h"  /* tb_egpu F40b sysfs observability (addon A8) */
 
 #if defined(NV_VGPU_KVM_BUILD)
 #include "nv-vgpu-vfio-interface.h"
@@ -2304,6 +2305,14 @@ nv_pci_probe
      */
     (void)tb_egpu_qwd_init(nvl);
 
+    /*
+     * tb_egpu F40b observability (addon A8): publish the read-only sysfs
+     * surface (state + F40b/recovery counters) on the device kobj. Resets
+     * metrics to a clean generation first, so an unbind-rebind starts fresh.
+     * Non-fatal on failure — the driver binds regardless.
+     */
+    (void)tb_egpu_metrics_init(nvl);
+
     nv_kmem_cache_free_stack(sp);
 
     return 0;
@@ -2385,6 +2394,13 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
      * NVreg_TbEgpuQwdIntervalMs (clamped max 60s).
      */
     tb_egpu_qwd_stop(nvl);
+
+    /*
+     * tb_egpu F40b observability (addon A8): remove the sysfs surface
+     * before state teardown. Benign no-op if it was never created; no
+     * backing state to free (metrics struct is module-static).
+     */
+    tb_egpu_metrics_stop(nvl);
 
     /*
      * tb_egpu recovery (addon A3): drain any pending recovery work

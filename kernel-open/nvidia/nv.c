@@ -57,6 +57,7 @@
 #include "nv-caps-imex.h"
 #include "nv-tb-egpu-recover.h"  /* tb_egpu recovery (addon A3) */
 #include "nv-tb-egpu-close.h"    /* tb_egpu close-path telemetry (addon A4) */
+#include "nv-tb-egpu-metrics.h"  /* tb_egpu F40b sysfs observability (addon A8) */
 
 /*
  * Commit aefb2f2e619b ("x86/bugs: Rename CONFIG_RETPOLINE =>
@@ -1903,6 +1904,10 @@ static int nv_open_device_for_nvlfp_bounded(
          * chip-touching MMIO fails-fast and the worker returns. */
         rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
 
+        /* A8: record this F40b fire and transition state to lost-temporary.
+         * Counter + state are visible at /sys/bus/pci/devices/<bdf>/tb_egpu_* */
+        nv_tb_egpu_f40b_fired();
+
         /* UAF GUARD (R0, 2026-05-31) — MANDATORY on the open path, symmetric
          * with A7's SH-3 guard on the shutdown path.  The worker runs
          * nv_open_device_for_nvlfp(w->nv, w->sp, w->nvlfp), which writes
@@ -2298,6 +2303,21 @@ static void nv_f40b_shutdown_bounded(
          * subsequent RM operations.  After this, the worker's next
          * sink-aware chip-touching MMIO fails-fast and the worker returns. */
         rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+
+        /* A8 (teardown variant): COUNT this F40b fire but do NOT touch state.
+         * The shutdown/rmmod path is the DOMINANT F40b fire class — counting
+         * it makes tb_egpu_f40b_fires honour A7's "single counter for both A6
+         * and A7 fires" contract.  But a teardown timeout is NOT a "GPU is now
+         * unusable" event: it fires during nv_shutdown_adapter (rmmod, or a
+         * pre-persistence close-path nv_stop_device on bring-up), after which a
+         * fresh bind works fine.  Setting state=lost-temporary here would
+         * strand a healthy GPU's tb_egpu_state at lost-temporary after every
+         * normal bring-up with no path back to healthy until A9 — a
+         * false-negative health signal.  Placed once in the shared helper
+         * (per-timeout); incremented BEFORE the flush below so the fire is
+         * recorded even if the flush blocks on a genuinely-stuck worker.
+         * Counter visible at /sys/bus/pci/devices/<bdf>/tb_egpu_f40b_fires. */
+        nv_tb_egpu_f40b_fired_teardown();
 
         /* UAF GUARD (SH-3, 2026-05-30) — MANDATORY on the .remove/rmmod path.
          * nv_f40b_shutdown_bounded runs inside nv_shutdown_adapter, which on
