@@ -2170,11 +2170,175 @@ failed:
     return rc;
 }
 
+/* === F40b: bounded-wait wrapper for chip-touching rm_* calls in shutdown ===
+ *
+ * Symmetric counterpart to A6's open-path wrapper.  rm_disable_adapter and
+ * rm_shutdown_adapter both reach RM closed code that performs chip-touching
+ * MMIO; on a userspace-recovered or otherwise broken-substrate eGPU, those
+ * MMIOs can hang the same way RmInitAdapter does on the open path.  The
+ * 20:52 rmmod-path host wedge (2026-05-29 evening) attests to this class
+ * — see /var/log/mission-1-archaeology/a7-deploy-wedge-2026-05-29/
+ * FORENSICS-REPORT.md and docs/missions/.../design/
+ * in-driver-recovery-target-2026-05-29.md.
+ *
+ * A7 wraps each rm_* call in nv_shutdown_adapter with a bounded-wait
+ * worker.  On completion within budget: pass through.  On timeout: declare
+ * GPU lost via the C5 sink primitive and return to the caller; the leaked
+ * worker exits when sink-aware MMIO inside RM fails-fast.  The remainder
+ * of nv_shutdown_adapter (kthread stops, IRQ teardown, mutex frees) is
+ * host-side safe-synchronous work and runs to completion regardless,
+ * letting nv_pci_remove_helper finish cleanly so rmmod returns.
+ *
+ * Gated by NVreg_TbEgpuShutdownTimeoutMs > 0 AND nv->is_external_gpu.
+ */
+
+unsigned int NVreg_TbEgpuShutdownTimeoutMs = 1200;
+module_param(NVreg_TbEgpuShutdownTimeoutMs, uint, 0644);
+MODULE_PARM_DESC(NVreg_TbEgpuShutdownTimeoutMs,
+    "F40b: timeout in ms for chip-touching shutdown-path RM calls on "
+    "E1-classified eGPUs (default 1200ms = 2x the measured ~600ms graceful "
+    "rm_shutdown_adapter completion; experiment SH-1, 2026-05-30).  The 200ms "
+    "default this replaces was ~3x too tight and declared the GPU lost "
+    "PREMATURELY on every teardown — rm_shutdown_adapter does NOT hang, it "
+    "busy-polls a GSP shutdown handshake for ~600ms then completes.  On a "
+    "genuine timeout, declare GPU lost via C5 sink and skip the wedged RM "
+    "call so rmmod can complete.  0 = disabled (synchronous path).");
+
+typedef void (*nv_f40b_shutdown_rm_call_t)(nvidia_stack_t *, nv_state_t *);
+
+struct nv_f40b_shutdown_work {
+    struct work_struct          work;
+    struct completion           done;
+    nv_f40b_shutdown_rm_call_t  rm_call;
+    nvidia_stack_t             *sp;
+    nv_state_t                 *nv;
+    atomic_t                    refcount;
+};
+
+static void nv_f40b_shutdown_work_put(struct nv_f40b_shutdown_work *w)
+{
+    if (atomic_dec_and_test(&w->refcount))
+        kfree(w);
+}
+
+static void nv_f40b_shutdown_worker(struct work_struct *ws)
+{
+    struct nv_f40b_shutdown_work *w =
+        container_of(ws, struct nv_f40b_shutdown_work, work);
+
+    w->rm_call(w->sp, w->nv);
+    complete(&w->done);
+    nv_f40b_shutdown_work_put(w);
+}
+
+static void nv_f40b_shutdown_bounded(
+    nv_f40b_shutdown_rm_call_t  rm_call,
+    nvidia_stack_t             *sp,
+    nv_state_t                 *nv,
+    const char                 *call_name
+)
+{
+    struct nv_f40b_shutdown_work *w;
+    unsigned int                  timeout_ms = NVreg_TbEgpuShutdownTimeoutMs;
+    long                          jiffies_left;
+
+    /* Feature gates: disabled or non-eGPU → original synchronous call */
+    if (timeout_ms == 0)
+    {
+        rm_call(sp, nv);
+        return;
+    }
+
+    if (!nv->is_external_gpu)
+    {
+        rm_call(sp, nv);
+        return;
+    }
+
+    w = kzalloc(sizeof(*w), GFP_KERNEL);
+    if (w == NULL)
+    {
+        /* Allocation failure → fall back to synchronous; under memory
+         * pressure the worker indirection would add risk, not subtract
+         * it.  The hang risk is identical to the pre-A7 baseline. */
+        rm_call(sp, nv);
+        return;
+    }
+
+    INIT_WORK(&w->work, nv_f40b_shutdown_worker);
+    init_completion(&w->done);
+    w->rm_call = rm_call;
+    w->sp      = sp;
+    w->nv      = nv;
+    atomic_set(&w->refcount, 2);   /* one ref for caller, one for worker */
+
+    nv_printf(NV_DBG_ERRORS,
+        "NVRM: tb_egpu [F40b]: %s scheduled to bounded worker "
+        "(timeout=%u ms)\n", call_name, timeout_ms);
+
+    queue_work(system_long_wq, &w->work);
+
+    jiffies_left = wait_for_completion_timeout(&w->done,
+                                                msecs_to_jiffies(timeout_ms));
+
+    if (jiffies_left > 0)
+    {
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [F40b]: %s completed within budget\n", call_name);
+    }
+    else
+    {
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [F40b]: %s timed out after %u ms — declaring "
+            "GPU lost (detector_class=3 DETECTOR_AER_FATAL); setting sink "
+            "and flushing worker before return\n",
+            call_name, timeout_ms);
+
+        /* C5 sink primitive — sets PDB_PROP_GPU_IS_LOST and propagates to
+         * subsequent RM operations.  After this, the worker's next
+         * sink-aware chip-touching MMIO fails-fast and the worker returns. */
+        rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+
+        /* UAF GUARD (SH-3, 2026-05-30) — MANDATORY on the .remove/rmmod path.
+         * nv_f40b_shutdown_bounded runs inside nv_shutdown_adapter, which on
+         * the rmmod path is called from nv_pci_remove_helper DURING the
+         * module exit function.  The worker runs nv_f40b_shutdown_worker +
+         * rm_call (rm_shutdown_adapter) — both nvidia.ko TEXT — and holds NO
+         * module reference (system_long_wq is a shared kernel workqueue that
+         * does not pin nvidia.ko; try_module_get would be ineffective because
+         * the worker is queued AFTER delete_module's refcount gate).  If we
+         * merely "leaked" the worker and returned, nv_pci_remove_helper would
+         * free nvidia.ko .text AND NV_KFREE(nvl) while the worker still
+         * executes/dereferences them -> double use-after-free / kernel panic.
+         *
+         * flush_work BLOCKS until the worker has left module text and
+         * returned.  The sink set above makes the worker fail-fast, so in the
+         * (rare) genuine-timeout case this returns in microseconds.  In the
+         * COMMON healthy case this branch is never reached — rm_shutdown_adapter
+         * completes in ~600 ms, well within the 1200 ms budget (SH-1, n=3).
+         * Only a truly non-returning MMIO that never consults the sink makes
+         * this flush block the teardown thread — a bounded HANG that leaves
+         * the host alive (reboot to clear), strictly safer than a kernel-wide
+         * UAF panic and identical to the pre-A7 synchronous outcome for a
+         * genuinely-stuck MMIO. */
+        flush_work(&w->work);
+    }
+
+    nv_f40b_shutdown_work_put(w);    /* drop caller's ref (worker has already
+                                      * dropped its ref: completed within
+                                      * budget on the if-path, or flushed on
+                                      * the timeout-path) */
+}
+
 void nv_shutdown_adapter(nvidia_stack_t *sp,
                          nv_state_t *nv,
                          nv_linux_state_t *nvl)
 {
-    rm_disable_adapter(sp, nv);
+    /* F40b: bounded-wait wrapper protects against PCIe Completion Timeout
+     * MMIO hangs on userspace-recovered eGPU chips during rmmod (FORENSICS
+     * 2026-05-29 20:52).  Non-eGPU or feature-disabled paths fall through
+     * to the original synchronous call. */
+    nv_f40b_shutdown_bounded(rm_disable_adapter, sp, nv, "rm_disable_adapter");
 
     // It's safe to call nv_kthread_q_stop even if queue is not initialized
     nv_kthread_q_stop(&nvl->bottom_half_q);
@@ -2223,7 +2387,8 @@ void nv_shutdown_adapter(nvidia_stack_t *sp,
         nvl->msix_bh_mutex = NULL;
     }
 
-    rm_shutdown_adapter(sp, nv);
+    /* F40b: bounded-wait wrapper (symmetric with rm_disable_adapter above). */
+    nv_f40b_shutdown_bounded(rm_shutdown_adapter, sp, nv, "rm_shutdown_adapter");
 
     if (nv->flags & NV_FLAG_TRIGGER_FLR)
     {
