@@ -1895,19 +1895,54 @@ static int nv_open_device_for_nvlfp_bounded(
     {
         nv_printf(NV_DBG_ERRORS,
             "NVRM: tb_egpu [F40b]: open timed out after %u ms — declaring GPU "
-            "lost (detector_class=3 DETECTOR_AER_FATAL); worker leaked, will "
-            "exit when MMIO fails-fast post-sink-set\n", timeout_ms);
+            "lost (detector_class=3 DETECTOR_AER_FATAL); setting sink and "
+            "flushing worker before return\n", timeout_ms);
 
         /* C5 sink primitive — sets PDB_PROP_GPU_IS_LOST and propagates to
-         * subsequent RM operations.  The leaked worker's nv_open_device call
-         * (still in flight inside RmInitAdapter) will see the sink at the
-         * next sink-aware check and abort, allowing the worker to exit. */
+         * subsequent RM operations.  After this, the worker's next sink-aware
+         * chip-touching MMIO fails-fast and the worker returns. */
         rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+
+        /* UAF GUARD (R0, 2026-05-31) — MANDATORY on the open path, symmetric
+         * with A7's SH-3 guard on the shutdown path.  The worker runs
+         * nv_open_device_for_nvlfp(w->nv, w->sp, w->nvlfp), which writes
+         * w->nvlfp (nvlfp->open_rc / adapter_status) while still in flight.
+         * On this foreground timeout, nvidia_open's `failed:` path frees that
+         * very nvlfp (and sp) the instant we return -EIO — the refcount-2
+         * protocol protects only the work struct, NOT nvlfp/sp.  If we merely
+         * "leaked" the worker and returned, the worker would dereference and
+         * write FREED nvlfp -> use-after-free (fake-5090 F42); a subsequent
+         * rmmod/slot-cycle re-recovery on top of the in-flight worker is the
+         * full double-UAF (freed nvidia.ko .text + freed nvl).
+         *
+         * flush_work BLOCKS until the worker has left nv_open_device_for_nvlfp
+         * and returned, so nvlfp/sp are provably live at the worker's last
+         * dereference.
+         *
+         * COST (NOT "fast" — corrected per the R0 correctness audit 2026-05-31):
+         * the C5 sink does NOT fast-fail this particular poll. rm_cleanup_gpu_
+         * lost_state() above itself takes the RM API lock with a BLOCKING acquire
+         * (osapi.c rmapiLockAcquire, API_LOCK_FLAGS_NONE), and the worker holds
+         * that API lock for the whole GSP-lockdown poll (the chip ANSWERS the
+         * polled reads, so no dead-bus sentinel trips). So this timeout branch
+         * re-couples the open syscall to the worker and blocks for up to the RM
+         * gpuTimeout (~4 s graphics / ~30 s compute, os.c gpu_timeout) with
+         * nvl->ldata_lock HELD — serializing concurrent opens/closes/remove
+         * behind it. This is a finite, host-alive SOFT wait, strictly safer than
+         * the kernel-wide UAF panic it replaces, but it DOES undo A6's 200 ms
+         * fast-return on the bad-chip path. The actual bound (which gpuTimeout
+         * mode applies) is what the recovery-validation R2/R3 rungs measure;
+         * stop-rule -> E27. The structural fix that keeps the decoupling (route
+         * the bounded open through the existing deferred-open lifecycle) is
+         * queued for v5. */
+        flush_work(&w->work);
 
         rc = -EIO;
     }
 
-    nv_f40b_open_work_put(w);    /* drop caller's ref; worker still has 1 if running */
+    nv_f40b_open_work_put(w);    /* drop caller's ref (worker has dropped its
+                                  * ref: completed-within-budget on the if-path,
+                                  * or flushed above on the timeout-path) */
     return rc;
 }
 
