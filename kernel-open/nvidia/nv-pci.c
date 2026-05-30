@@ -2026,6 +2026,20 @@ nv_pci_probe
     nv->pci_info.bus       = NV_PCI_BUS_NUMBER(pci_dev);
     nv->pci_info.slot      = NV_PCI_SLOT_NUMBER(pci_dev);
     nv->handle             = pci_dev;
+
+    /*
+     * tb_egpu (addon A9): classify the external GPU at PROBE so the A6 open-path
+     * and A7 shutdown-path bounded-wait gates read a correct nv->is_external_gpu
+     * on the FIRST open of a bind. The blob otherwise sets this flag lazily
+     * inside the first open's RmInitAdapter (osinit.c), leaving the first open
+     * unguarded -> host wedge on a userspace-recovered chip (forensics:
+     * OA-reset-ladder-wedge-2026-05-31). os_pci_is_thunderbolt_attached() is
+     * E1's pure-PCI-topology detector: probe-safe (no chip MMIO, no GPU lock)
+     * and byte-identical to the value the blob sets. MUST be after the
+     * nv->handle assignment above (before it, handle is NULL -> NV_FALSE, a
+     * silent no-op that re-wedges). Monotonic: nothing writes this field FALSE.
+     */
+    nv->is_external_gpu    = os_pci_is_thunderbolt_attached(nv->handle);
     nv->flags             |= flags;
 
     if (!nv_lock_init_locks(sp, nv))
