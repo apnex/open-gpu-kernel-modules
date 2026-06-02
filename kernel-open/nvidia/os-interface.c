@@ -334,7 +334,17 @@ NV_STATUS NV_API_CALL os_cond_acquire_rwlock_read(void *pRwLock)
 {
     os_rwlock_t *os_rwlock = (os_rwlock_t *)pRwLock;
 
-    if (down_read_trylock(&os_rwlock->sem))
+    //
+    // down_read_trylock() returns 1 when the lock IS acquired and 0 on
+    // contention -- the OPPOSITE convention to down_trylock() (0 == acquired)
+    // used by os_cond_acquire_mutex/semaphore above.  The '!' is load-bearing:
+    // report NV_ERR_TIMEOUT_RETRY only when the trylock FAILED (returned 0),
+    // and fall through holding the lock on success.  Without it, a successful
+    // acquire returned TIMEOUT_RETRY (leaking the held rwsem) and a contended
+    // acquire returned NV_OK, so the caller ran the protected body and then
+    // released a lock it never held -> rwsem count corruption.  Do NOT "simplify".
+    //
+    if (!down_read_trylock(&os_rwlock->sem))
     {
         return NV_ERR_TIMEOUT_RETRY;
     }
@@ -346,7 +356,17 @@ NV_STATUS NV_API_CALL os_cond_acquire_rwlock_write(void *pRwLock)
 {
     os_rwlock_t *os_rwlock = (os_rwlock_t *)pRwLock;
 
-    if (down_write_trylock(&os_rwlock->sem))
+    //
+    // down_write_trylock() returns 1 when the lock IS acquired and 0 on
+    // contention -- the OPPOSITE convention to down_trylock() (0 == acquired)
+    // used by os_cond_acquire_mutex/semaphore above.  The '!' is load-bearing:
+    // report NV_ERR_TIMEOUT_RETRY only when the trylock FAILED (returned 0),
+    // and fall through holding the lock on success.  Without it, a successful
+    // acquire returned TIMEOUT_RETRY (leaking the held rwsem) and a contended
+    // acquire returned NV_OK, so the caller ran the protected body and then
+    // released a lock it never held -> rwsem count corruption.  Do NOT "simplify".
+    //
+    if (!down_write_trylock(&os_rwlock->sem))
     {
         return NV_ERR_TIMEOUT_RETRY;
     }
