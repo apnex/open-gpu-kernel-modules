@@ -2740,9 +2740,25 @@ NV_STATUS rm_get_adapter_status(
 )
 {
     NV_STATUS rmStatus = NV_ERR_OPERATING_SYSTEM;
+    NvU32     apiLockFlags = RMAPI_LOCK_FLAGS_READ;
+
+    //
+    // A11 (F45 deadlock-breaker): on an external (Thunderbolt/USB4) GPU, take the
+    // API lock CONDITIONALLY.  The deferred-open worker reaches this on the cold-init
+    // FAILURE arm (nv_open_device_for_nvlfp -> rm_get_adapter_status_external); a
+    // blocking acquire there parks the single-threaded nv_open_q worker behind a
+    // held/contended API lock, wedging the close's open_complete wait and the pciehp
+    // open_q flush (F45).  adapter_status is best-effort telemetry, so on contention
+    // return the default NV_ERR_OPERATING_SYSTEM rather than block.  SINGLE attempt,
+    // NO retry (a retry would re-contend the lock the open_q flush needs to drain).
+    // Depends on the C6 cond-acquire primitive fix; gated by is_external_gpu (set at
+    // probe by A9) so dGPU behaviour is byte-for-byte unchanged.
+    //
+    if (pNv != NULL && pNv->is_external_gpu)
+        apiLockFlags |= RMAPI_LOCK_FLAGS_COND_ACQUIRE;
 
     // LOCK: acquire API lock
-    if (rmapiLockAcquire(RMAPI_LOCK_FLAGS_READ, RM_LOCK_MODULES_OSAPI) == NV_OK)
+    if (rmapiLockAcquire(apiLockFlags, RM_LOCK_MODULES_OSAPI) == NV_OK)
     {
         rmStatus = RmGetAdapterStatus(pNv, pStatus);
 

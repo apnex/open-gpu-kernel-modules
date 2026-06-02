@@ -1782,6 +1782,24 @@ static int nv_open_device_for_nvlfp(
     {
         nvlfp->adapter_status = NV_OK;
     }
+    else if (nv->is_external_gpu &&
+             (os_pci_is_disconnected(nv->handle) ||
+              nv_check_gpu_state(nv) == NV_ERR_GPU_IS_LOST))
+    {
+        //
+        // F45 (D1 deadlock-breaker): the cold open failed AND this external GPU is
+        // already declared lost (the C5 sink set os_pci_is_disconnected, or surprise
+        // removal).  rm_get_adapter_status_external() below would take the global RM
+        // API write lock; on this path the single-threaded nv_open_q worker can park
+        // there behind a held/contended lock, wedging the close's open_complete wait
+        // and the pciehp open_q flush (the F45 deadlock).  The status is already
+        // known -- report it WITHOUT the RM round-trip.  This is the lock-free,
+        // primitive-independent cut of the F45 keystone edge for the common
+        // already-lost case; the A11 conditional acquire in rm_get_adapter_status
+        // covers the rarer not-yet-lost-but-contended case.
+        //
+        nvlfp->adapter_status = NV_ERR_GPU_IS_LOST;
+    }
     else
     {
         nvlfp->adapter_status = rm_get_adapter_status_external(sp, nv);
