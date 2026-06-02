@@ -1903,7 +1903,14 @@ void NV_API_CALL rm_cleanup_gpu_lost_state(
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
 
     // Best-effort API lock; skip the RM-side marker set if contended.
-    if (rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_DESTROY) == NV_OK)
+    // A10 (F44 fix): COND_ACQUIRE makes this acquire ACTUALLY non-blocking (the
+    // NONE flag below was a blocking write-lock acquire, contradicting this
+    // comment's intent — on the WPR2-clear lockdown substrate it parked the
+    // foreground behind the worker holding the same lock, deadlocking the timeout
+    // branch and the AER error_detected callsite that shares this function). On
+    // contention it now takes the deferring branch; the lock-free Linux marker the
+    // F40b timeout branches set before calling here already fast-fails the worker.
+    if (rmapiLockAcquire(API_LOCK_FLAGS_COND_ACQUIRE, RM_LOCK_MODULES_DESTROY) == NV_OK)
     {
         pGpu = NV_GET_NV_PRIV_PGPU(pNv);
         if (pGpu != NULL)
