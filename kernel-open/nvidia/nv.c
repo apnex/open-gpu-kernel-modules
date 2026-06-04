@@ -2044,6 +2044,97 @@ static int __nv_pm_resume_locked(nv_state_t *nv, nvidia_stack_t *sp)
     return (rm_power_management(sp, nv, NV_PM_ACTION_RESUME) == NV_OK) ? 0 : -EIO;
 }
 
+/* A12: Family-2 runtime-PM resume bootstrap (GC6/RTD3-exit).  Same bounded
+ * mechanism as nv_bootstrap_bounded, but with a work struct carrying the
+ * {enter,bTryAgain} that rm_transition_dynamic_power needs (so the generic
+ * fn-pointer funnel can't be reused directly).  Holds NO ldata_lock (kernel PM-core
+ * runtime callback) — a stall here wedges only the runtime-PM worker, not a
+ * lock-holder, but we bound it so the GSP-bootstrap entry set is fully covered.
+ * On the completed path *bTryAgain is propagated; on the bounded timeout the GPU is
+ * declared lost (marker+sink) and *bTryAgain forced NV_FALSE (a lost GPU must not
+ * be rescheduled). */
+struct nv_dynpower_work {
+    struct work_struct  work;
+    struct completion   done;
+    nv_state_t         *nv;
+    nvidia_stack_t     *sp;
+    NvBool              enter;
+    NvBool              bTryAgain;
+    NV_STATUS           status;
+    atomic_t            refcount;
+};
+
+static void nv_dynpower_work_put(struct nv_dynpower_work *w)
+{
+    if (atomic_dec_and_test(&w->refcount))
+        kfree(w);
+}
+
+static void nv_dynpower_worker(struct work_struct *ws)
+{
+    struct nv_dynpower_work *w = container_of(ws, struct nv_dynpower_work, work);
+
+    w->status = rm_transition_dynamic_power(w->sp, w->nv, w->enter, &w->bTryAgain);
+    complete(&w->done);
+    nv_dynpower_work_put(w);
+}
+
+static NV_STATUS nv_dynpower_bounded(nv_state_t *nv, nvidia_stack_t *sp,
+                                     NvBool enter, NvBool *bTryAgain)
+{
+    struct nv_dynpower_work *w;
+    unsigned int              timeout_ms = NVreg_TbEgpuOpenTimeoutMs;
+    long                      jiffies_left;
+    NV_STATUS                 status;
+
+    /* Feature gates: disabled or non-eGPU → original synchronous path */
+    if (timeout_ms == 0 || !nv->is_external_gpu)
+        return rm_transition_dynamic_power(sp, nv, enter, bTryAgain);
+
+    w = kzalloc(sizeof(*w), GFP_KERNEL);
+    if (w == NULL)
+        return rm_transition_dynamic_power(sp, nv, enter, bTryAgain);
+
+    INIT_WORK(&w->work, nv_dynpower_worker);
+    init_completion(&w->done);
+    w->nv    = nv;
+    w->sp    = sp;
+    w->enter = enter;
+    atomic_set(&w->refcount, 2);
+
+    queue_work(system_long_wq, &w->work);
+
+    jiffies_left = wait_for_completion_timeout(&w->done, msecs_to_jiffies(timeout_ms));
+
+    if (jiffies_left > 0)
+    {
+        *bTryAgain = w->bTryAgain;
+        status     = w->status;
+    }
+    else
+    {
+        /* A10-v2 grace discriminator (no MMIO inspection — completion-state only) */
+        jiffies_left = wait_for_completion_timeout(&w->done,
+                              msecs_to_jiffies(NVreg_TbEgpuOpenGraceMs));
+        if (jiffies_left == 0)
+        {
+            nv_printf(NV_DBG_ERRORS,
+                "NVRM: tb_egpu [A12]: runtime-PM resume bootstrap stuck after %u + "
+                "%u ms grace — declaring GPU lost; dead-bus marker + sink\n",
+                timeout_ms, NVreg_TbEgpuOpenGraceMs);
+            os_pci_set_disconnected(nv->handle);
+            rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+        }
+        nv_tb_egpu_f40b_fired();
+        flush_work(&w->work);   /* load-bearing join: worker uses caller sp */
+        *bTryAgain = NV_FALSE;
+        status     = NV_ERR_GENERIC;
+    }
+
+    nv_dynpower_work_put(w);
+    return status;
+}
+
 static void nvidia_open_deferred(void *nvlfp_raw)
 {
     nv_linux_file_private_t *nvlfp = (nv_linux_file_private_t *) nvlfp_raw;
@@ -5617,7 +5708,12 @@ nvidia_transition_dynamic_power(
         return -ENOMEM;
     }
 
-    status = rm_transition_dynamic_power(sp, nv, enter, &bTryAgain);
+    /* A12: bound the runtime-PM resume bootstrap (GC6/RTD3-exit, enter==NV_FALSE,
+     * Family-2's 2nd site).  enter==NV_TRUE (suspend) is a teardown — left direct. */
+    if (!enter)
+        status = nv_dynpower_bounded(nv, sp, enter, &bTryAgain);
+    else
+        status = rm_transition_dynamic_power(sp, nv, enter, &bTryAgain);
 
     nv_kmem_cache_free_stack(sp);
 
