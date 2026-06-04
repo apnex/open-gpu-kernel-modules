@@ -1823,7 +1823,7 @@ MODULE_PARM_DESC(NVreg_TbEgpuOpenTimeoutMs,
     "(default 200ms = 4x PCIe Completion Timeout).  On timeout, declare GPU "
     "lost via C5 sink and return -EIO.  0 = disabled (synchronous path).");
 
-unsigned int NVreg_TbEgpuOpenGraceMs = 50;
+unsigned int NVreg_TbEgpuOpenGraceMs = 2000;
 module_param(NVreg_TbEgpuOpenGraceMs, uint, 0644);
 MODULE_PARM_DESC(NVreg_TbEgpuOpenGraceMs,
     "F40b/A10-v2: grace re-wait in ms AFTER the open bounded-wait timeout, used "
