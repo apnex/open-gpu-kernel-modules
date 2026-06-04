@@ -1815,7 +1815,7 @@ static int nv_open_device_for_nvlfp(
  * nv_open_device_for_nvlfp() call (zero behaviour change).
  */
 
-unsigned int NVreg_TbEgpuOpenTimeoutMs = 200;
+unsigned int NVreg_TbEgpuOpenTimeoutMs = 3000;
 module_param(NVreg_TbEgpuOpenTimeoutMs, uint, 0644);
 MODULE_PARM_DESC(NVreg_TbEgpuOpenTimeoutMs,
     "F40b: timeout in ms for chip-touching open path on E1-classified eGPUs "
