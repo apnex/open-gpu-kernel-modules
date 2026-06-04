@@ -1915,7 +1915,7 @@ static int nv_bootstrap_bounded(
     atomic_set(&w->refcount, 2);   /* one ref for caller, one for worker */
 
     nv_printf(NV_DBG_ERRORS,
-        "NVRM: tb_egpu [F40b]: open scheduled to bounded worker "
+        "NVRM: tb_egpu [F40b/A12]: open scheduled to bounded worker "
         "(timeout=%u ms)\n", timeout_ms);
 
     queue_work(system_long_wq, &w->work);
@@ -1927,7 +1927,7 @@ static int nv_bootstrap_bounded(
     {
         rc = w->rc;
         nv_printf(NV_DBG_ERRORS,
-            "NVRM: tb_egpu [F40b]: open completed within budget rc=%d\n", rc);
+            "NVRM: tb_egpu [F40b/A12]: open completed within budget rc=%d\n", rc);
     }
     else
     {
@@ -1974,7 +1974,7 @@ static int nv_bootstrap_bounded(
              * (whose own cleanupGpuLostStateAtomic also sinks) so error_state
              * stays pci_channel_io_normal and the chip is recoverable in-driver. */
             nv_printf(NV_DBG_ERRORS,
-                "NVRM: tb_egpu [F40b]: open timed out after %u ms but worker "
+                "NVRM: tb_egpu [F40b/A12]: open timed out after %u ms but worker "
                 "returned rc=%d within +%u ms grace — fast-fail, chip NOT sunk "
                 "(recoverable)\n", timeout_ms, w->rc, NVreg_TbEgpuOpenGraceMs);
         }
@@ -1986,7 +1986,7 @@ static int nv_bootstrap_bounded(
              * fast instead of blocking for the full gpuTimeout with ldata_lock
              * held. */
             nv_printf(NV_DBG_ERRORS,
-                "NVRM: tb_egpu [F40b]: open timed out after %u ms + %u ms grace, "
+                "NVRM: tb_egpu [F40b/A12]: open timed out after %u ms + %u ms grace, "
                 "worker still in GSP lockdown poll — declaring GPU lost "
                 "(DETECTOR_AER_FATAL); dead-bus marker + sink\n",
                 timeout_ms, NVreg_TbEgpuOpenGraceMs);
@@ -2119,7 +2119,7 @@ static NV_STATUS nv_dynpower_bounded(nv_state_t *nv, nvidia_stack_t *sp,
         if (jiffies_left == 0)
         {
             nv_printf(NV_DBG_ERRORS,
-                "NVRM: tb_egpu [A12]: runtime-PM resume bootstrap stuck after %u + "
+                "NVRM: tb_egpu [F40b/A12]: runtime-PM resume bootstrap stuck after %u + "
                 "%u ms grace — declaring GPU lost; dead-bus marker + sink\n",
                 timeout_ms, NVreg_TbEgpuOpenGraceMs);
             os_pci_set_disconnected(nv->handle);
