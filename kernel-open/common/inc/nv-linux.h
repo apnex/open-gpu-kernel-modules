@@ -1451,6 +1451,15 @@ typedef struct nv_linux_state_s {
      * persistent kill-switch file overrides it to 0).
      */
     struct tb_egpu_recover_state *recover;
+
+    /*
+     * #292 (A13) in-flight-AER early-free gate. Lock-free atomic. Set by
+     * nv_bootstrap_bounded (A12 funnel) while a chip-touching bootstrap
+     * worker is QUEUED; read by nv_pci_error_detected to free a stuck worker
+     * via the lock-free os_pci_set_disconnected marker. Lives on nvl (NOT
+     * ->recover) so it still works with NVreg_TbEgpuRecoverEnable=0.
+     */
+    atomic_t bootstrap_in_flight;
 } nv_linux_state_t;
 
 extern nv_linux_state_t *nv_linux_devices;

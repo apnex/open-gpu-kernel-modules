@@ -1892,6 +1892,7 @@ static int nv_bootstrap_bounded(
 )
 {
     struct nv_bootstrap_work *w;
+    nv_linux_state_t         *nvl = NV_GET_NVL_FROM_NV_STATE(nv);
     unsigned int              timeout_ms = NVreg_TbEgpuOpenTimeoutMs;
     long                      jiffies_left;
     int                       rc;
@@ -1918,6 +1919,9 @@ static int nv_bootstrap_bounded(
         "NVRM: tb_egpu [F40b/A12]: open scheduled to bounded worker "
         "(timeout=%u ms)\n", timeout_ms);
 
+    /* #292 (A13): mark the in-flight window so an uncorrectable AER during
+     * this bootstrap frees the stuck worker via nv_pci_error_detected. */
+    atomic_set(&nvl->bootstrap_in_flight, 1);
     queue_work(system_long_wq, &w->work);
 
     jiffies_left = wait_for_completion_timeout(&w->done,
@@ -1926,6 +1930,11 @@ static int nv_bootstrap_bounded(
     if (jiffies_left > 0)
     {
         rc = w->rc;
+        /* #292 (A13): worker returned (done with MMIO) — clear the in-flight
+         * marker NOW, not at the common tail, to close the budget-success
+         * window where a spurious post-init AER could wrongly sink a healthy
+         * chip. */
+        atomic_set(&nvl->bootstrap_in_flight, 0);
         nv_printf(NV_DBG_ERRORS,
             "NVRM: tb_egpu [F40b/A12]: open completed within budget rc=%d\n", rc);
     }
@@ -2026,6 +2035,9 @@ static int nv_bootstrap_bounded(
          * holds only the GPU group lock across the poll, so the wedge was
          * ldata_lock + an unbounded flush, which the marker now bounds.) */
         flush_work(&w->work);
+        /* #292 (A13): worker joined (provably done with MMIO) — clear the
+         * in-flight marker. */
+        atomic_set(&nvl->bootstrap_in_flight, 0);
 
         rc = -EIO;
     }

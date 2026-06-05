@@ -2956,6 +2956,31 @@ nv_pci_error_detected(struct pci_dev *pci_dev, pci_channel_state_t state)
     if (nvl)
         st = nvl->recover;
 
+    /*
+     * #292 (A13) in-flight-AER early-free: an uncorrectable AER while a
+     * chip-touching bootstrap worker is queued on this nv means the chip
+     * fell off the bus mid-init. Set the LOCK-FREE dead-bus marker NOW so
+     * the stuck GSP poll self-terminates (osIsGpuBusDead -> 0xFFFFFFFF) and
+     * the ldata_lock-holding foreground re-open is released BEFORE this AER
+     * thread can become the F44 second contender. Gate = bootstrap_in_flight
+     * ALONE: do NOT test channel state — the captured #292 AER is
+     * Uncorrectable NON-fatal (pci_channel_io_normal). error_detected is only
+     * invoked for uncorrectable errors, so an in-flight fire is always a
+     * doomed init; a normal recoverable AER with no in-flight bootstrap never
+     * sets the marker and still reaches GATE_OK -> NEED_RESET. Lockless
+     * (pci_get_drvdata + os_pci_set_disconnected WRITE_ONCE + atomic_read) so
+     * it never blocks on ldata_lock.
+     */
+    if (nvl != NULL && atomic_read(&nvl->bootstrap_in_flight))
+    {
+        nv_state_t *lost_nv = NV_STATE_PTR(nvl);
+
+        nv_printf(NV_DBG_ERRORS,
+            "tb_egpu recover: AER during in-flight bootstrap -> early "
+            "dead-bus marker to free stuck open worker (#292)\n");
+        os_pci_set_disconnected(lost_nv->handle);
+    }
+
     gate = tb_egpu_recover_pre_schedule_gates(st, pci_dev, &reason);
 
     switch (gate)
