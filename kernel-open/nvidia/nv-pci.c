@@ -36,6 +36,65 @@
 #endif
 #include <linux/iommu.h>
 
+/*
+ * #292 (A14) re-open fail-fast gate — always-on sysfs surface.
+ *
+ * Lives in nv-pci.c (shared base file) rather than the Enable-gated A3
+ * recover attr group: the A14 bits sit on nvl and MUST work with
+ * NVreg_TbEgpuRecoverEnable=0 (the recover-disabled validation control).
+ * Registered unconditionally in nv_pci_probe, removed in remove before nvl
+ * is freed.
+ *
+ *   tb_egpu_diverged_recovered (0200) — fix-bar1 --bind writes 1 after a
+ *       userspace BAR1 recovery to declare the chip EQ-diverged (#979).
+ *   tb_egpu_reopen_blocked     (0444) — reads 1 when the A14 gate would
+ *       refuse the next open (diverged && GSP-torndown), so orchestration
+ *       can distinguish an A14 -EIO from other -EIO.
+ */
+static ssize_t tb_egpu_diverged_recovered_store(struct device *dev,
+                                                struct device_attribute *attr,
+                                                const char *buf, size_t count)
+{
+    nv_linux_state_t *nvl = pci_get_drvdata(to_pci_dev(dev));
+    unsigned long val;
+
+    if (nvl == NULL)
+        return -ENODEV;
+    if (kstrtoul(buf, 0, &val) != 0)
+        return -EINVAL;
+
+    atomic_set(&nvl->diverged_recovered, val ? 1 : 0);
+    if (!val)   /* clearing divergence also disarms the gate */
+        atomic_set(&nvl->reopen_gsp_torndown, 0);
+    return count;
+}
+static DEVICE_ATTR(tb_egpu_diverged_recovered, 0200, NULL,
+                   tb_egpu_diverged_recovered_store);
+
+static ssize_t tb_egpu_reopen_blocked_show(struct device *dev,
+                                           struct device_attribute *attr,
+                                           char *buf)
+{
+    nv_linux_state_t *nvl = pci_get_drvdata(to_pci_dev(dev));
+
+    if (nvl == NULL)
+        return -ENODEV;
+    return scnprintf(buf, PAGE_SIZE, "%d\n",
+                     (atomic_read(&nvl->diverged_recovered) &&
+                      atomic_read(&nvl->reopen_gsp_torndown)) ? 1 : 0);
+}
+static DEVICE_ATTR(tb_egpu_reopen_blocked, 0444,
+                   tb_egpu_reopen_blocked_show, NULL);
+
+static struct attribute *tb_egpu_a14_attrs[] = {
+    &dev_attr_tb_egpu_diverged_recovered.attr,
+    &dev_attr_tb_egpu_reopen_blocked.attr,
+    NULL,
+};
+static const struct attribute_group tb_egpu_a14_attr_group = {
+    .attrs = tb_egpu_a14_attrs,
+};
+
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/jiffies.h>
@@ -2327,6 +2386,15 @@ nv_pci_probe
      */
     (void)tb_egpu_metrics_init(nvl);
 
+    /*
+     * #292 (A14): always-on re-open-gate sysfs (independent of
+     * NVreg_TbEgpuRecoverEnable). Non-fatal on failure.
+     */
+    if (sysfs_create_group(&pci_dev->dev.kobj, &tb_egpu_a14_attr_group) != 0)
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [A14]: sysfs_create_group failed (gate still "
+            "armable via in-driver auto-set only)\n");
+
     nv_kmem_cache_free_stack(sp);
 
     return 0;
@@ -2415,6 +2483,10 @@ static void nv_pci_remove_helper(struct pci_dev *pci_dev, bool block_if_gpu_in_u
      * backing state to free (metrics struct is module-static).
      */
     tb_egpu_metrics_stop(nvl);
+
+    /* #292 (A14): remove the always-on gate attrs before nvl is freed. */
+    if (nvl->pci_dev)
+        sysfs_remove_group(&nvl->pci_dev->dev.kobj, &tb_egpu_a14_attr_group);
 
     /*
      * tb_egpu recovery (addon A3): drain any pending recovery work

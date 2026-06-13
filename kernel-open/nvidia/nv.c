@@ -1904,6 +1904,28 @@ static int nv_bootstrap_bounded(
     if (!nv->is_external_gpu)
         return fn(nv, sp);
 
+    /*
+     * #292 (A14) re-open fail-fast gate (defense-in-depth; C7 is the
+     * load-bearing layer).  A userspace-recovered (EQ-diverged) chip whose
+     * last close was a full GSP teardown (WPR2 cleared) wedge-prone-reopens
+     * near-deterministically; refuse it BEFORE the worker is queued and any
+     * GSP poll is entered.  -EIO = cold-recover contract: re-run
+     * fix-bar1 --bind (slot-cycle => fresh nvl => bits clear) or cold-plug.
+     * Deliberately does NOT set os_pci_set_disconnected — the chip is
+     * untouched and stays recoverable.
+     */
+    if (atomic_read(&nvl->diverged_recovered) &&
+        atomic_read(&nvl->reopen_gsp_torndown))
+    {
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [A14]: refusing re-open of diverged-recovered eGPU "
+            "(WPR2-torndown) before GSP bringup -> -EIO (#292); recover via "
+            "fix-bar1 --bind / cold-plug\n");
+        nv_tb_egpu_f40b_fired();
+        tb_egpu_recover_emit_uevent(nvl->pci_dev, "PERMANENT_FAIL");
+        return -EIO;
+    }
+
     w = kzalloc(sizeof(*w), GFP_KERNEL);
     if (w == NULL)
         return fn(nv, sp);   /* cannot bound → synchronous fallback (don't fail bringup) */
@@ -1935,6 +1957,11 @@ static int nv_bootstrap_bounded(
          * window where a spurious post-init AER could wrongly sink a healthy
          * chip. */
         atomic_set(&nvl->bootstrap_in_flight, 0);
+        /* #292 (A14): a SUCCESSFUL bringup proves the prior teardown state is
+         * stale — re-arm-clear so the gate only ever reflects the
+         * immediately-prior last-close. */
+        if (rc == 0)
+            atomic_set(&nvl->reopen_gsp_torndown, 0);
         nv_printf(NV_DBG_ERRORS,
             "NVRM: tb_egpu [F40b/A12]: open completed within budget rc=%d\n", rc);
     }
@@ -2006,6 +2033,12 @@ static int nv_bootstrap_bounded(
                 timeout_ms, NVreg_TbEgpuOpenGraceMs);
             os_pci_set_disconnected(nv->handle);
             rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+            /* #292 (A14) auto-OR: a lockdown-stuck bootstrap is in-driver
+             * evidence of the #979 divergence — arm the sticky bit so the
+             * gate can also fire without the userspace assertion.  (The
+             * fast-fail arm above is deliberately NOT marked: it is the
+             * transient, self-healing substrate.) */
+            atomic_set(&nvl->diverged_recovered, 1);
         }
 
         /* A8: record this F40b fire and transition state to lost-temporary.
@@ -2112,6 +2145,21 @@ static NV_STATUS nv_dynpower_bounded(nv_state_t *nv, nvidia_stack_t *sp,
     if (timeout_ms == 0 || !nv->is_external_gpu)
         return rm_transition_dynamic_power(sp, nv, enter, bTryAgain);
 
+    /* #292 (A14): same fail-fast gate as nv_bootstrap_bounded — the dynpower
+     * funnel is the second GSP-bringup path (GAP-1).  Refuse a diverged
+     * post-teardown re-bringup before any chip touch. */
+    if (atomic_read(&nvl->diverged_recovered) &&
+        atomic_read(&nvl->reopen_gsp_torndown))
+    {
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [A14]: refusing dynpower re-bringup of "
+            "diverged-recovered eGPU (WPR2-torndown) -> error (#292)\n");
+        nv_tb_egpu_f40b_fired();
+        tb_egpu_recover_emit_uevent(nvl->pci_dev, "PERMANENT_FAIL");
+        *bTryAgain = NV_FALSE;
+        return NV_ERR_GENERIC;
+    }
+
     w = kzalloc(sizeof(*w), GFP_KERNEL);
     if (w == NULL)
         return rm_transition_dynamic_power(sp, nv, enter, bTryAgain);
@@ -2153,6 +2201,9 @@ static NV_STATUS nv_dynpower_bounded(nv_state_t *nv, nvidia_stack_t *sp,
                 timeout_ms, NVreg_TbEgpuOpenGraceMs);
             os_pci_set_disconnected(nv->handle);
             rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL);
+            /* #292 (A14) auto-OR: stuck dynpower bringup = divergence
+             * evidence (mirrors the open-funnel lockdown arm). */
+            atomic_set(&nvl->diverged_recovered, 1);
         }
         nv_tb_egpu_f40b_fired();
         flush_work(&w->work);   /* load-bearing join: worker uses caller sp */
@@ -2676,6 +2727,25 @@ void nv_stop_device(nv_state_t *nv, nvidia_stack_t *sp)
         {
             nv_acpi_unregister_notifier(nvl);
             nv_shutdown_adapter(sp, nv, nvl);
+
+            /*
+             * #292 (A14): a persistence-OFF LAST-CLOSE full teardown of a
+             * userspace-recovered (diverged) chip is the wedge-prone-reopen
+             * substrate — nv_shutdown_adapter completing IS the GSP-teardown
+             * signal (WPR2 cleared by construction; the A4 post-shutdown diag
+             * line below logs the corroborating WPR2 value).  Arm the gate so
+             * the NEXT open/resume is refused before any GSP poll.  Structural
+             * signal only — deliberately no extra MMIO read here (A4's diag
+             * already performs the one passive read at this site).
+             */
+            if (nv->is_external_gpu &&
+                atomic_read(&nvl->diverged_recovered))
+            {
+                atomic_set(&nvl->reopen_gsp_torndown, 1);
+                nv_printf(NV_DBG_ERRORS,
+                    "NVRM: tb_egpu [A14]: diverged chip GSP-torndown at "
+                    "last-close — next re-open will be refused (#292)\n");
+            }
         }
         /*
          * tb_egpu close-path telemetry (addon A4): post-shutdown site.

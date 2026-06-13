@@ -1460,6 +1460,28 @@ typedef struct nv_linux_state_s {
      * ->recover) so it still works with NVreg_TbEgpuRecoverEnable=0.
      */
     atomic_t bootstrap_in_flight;
+
+    /*
+     * #292 (A14) re-open fail-fast gate bits. Lock-free atomics, zero-init
+     * with the kzalloc of nvl at probe and destroyed with it on remove —
+     * which IS the false-positive guard: a fresh enumeration (cold-plug or
+     * fix-bar1 slot-cycle) re-creates nvl with both bits clear.
+     *   diverged_recovered  — asserted by userspace (fix-bar1 --bind, via the
+     *                         always-on 0200 sysfs attr in nv-pci.c) after a
+     *                         userspace BAR1 recovery left the chip
+     *                         EQ-diverged; also auto-set on any F40b fire.
+     *   reopen_gsp_torndown — armed at a persistence-OFF LAST-CLOSE full
+     *                         teardown (nv_shutdown_adapter completed =>
+     *                         WPR2 cleared by construction) of a
+     *                         diverged_recovered chip.
+     * Gate predicate (both funnels): external && diverged && torndown
+     * => refuse the re-open with -EIO BEFORE any GSP poll is entered.
+     * PROBABILISTIC defense-in-depth — divergence is driver-invisible live,
+     * so this gate can false-negative on a novel divergence; C7 (the poll
+     * readers) is the load-bearing layer. Never ship this gate INSTEAD of C7.
+     */
+    atomic_t diverged_recovered;
+    atomic_t reopen_gsp_torndown;
 } nv_linux_state_t;
 
 extern nv_linux_state_t *nv_linux_devices;
