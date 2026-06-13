@@ -279,7 +279,9 @@ nvdDumpAllEngines_IMPL
         // callback, each one stalling on a dead-bus completion timeout.
         // This break also covers PDB_PROP_GPU_IS_LOST.
         //
-        if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ||
+        if (osIsGpuBusLost(pGpu) || /* C7-e7 (#292): widened from PDB-only —
+                                     * also honors the lock-free os_pci marker.
+                                     * Keep the INACCESSIBLE term below. */
             pGpu->getProperty(pGpu, PDB_PROP_GPU_INACCESSIBLE))
         {
             // C5 v4: per-site log retired; canonical sink log already

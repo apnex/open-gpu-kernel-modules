@@ -53,6 +53,7 @@
 #include "nvrm_registry.h"
 #include "gpu/conf_compute/ccsl.h"
 #include "gpu/conf_compute/conf_compute.h"
+#include "gpu/nv-gpu-lost.h"   /* C7 (#292): osIsGpuBusLost dead-bus predicate */
 
 static void _gspMsgQueueCleanup(MESSAGE_QUEUE_INFO *pMQI);
 
@@ -374,6 +375,15 @@ NV_STATUS GspStatusQueueInit(OBJGPU *pGpu, MESSAGE_QUEUE_INFO **ppMQI)
 
         osSpinLoop();
 
+        /* C7-e6 (#292): explicit lost-bus short-circuit — the rx-link cond is
+         * SYSMEM; do not rely on the accidental kgspHealthCheck MMIO escape
+         * below (dead-value polarity-dependent, GAP-2). */
+        if (osIsGpuBusLost(pGpu))
+        {
+            nvStatus = NV_ERR_RESET_REQUIRED;
+            break;
+        }
+
         nvStatus = gpuCheckTimeout(pGpu, &timeout);
         if (nvStatus != NV_OK)
             break;
@@ -547,6 +557,16 @@ NV_STATUS GspMsgQueueSendCommand(MESSAGE_QUEUE_INFO *pMQI, OBJGPU *pGpu)
             pNextElement = (NvU8 *)msgqTxGetWriteBuffer(pMQI->hQueue, i);
 
             if (pNextElement != NULL)
+                break;
+
+            /* C7-e6 (#292): the write-buffer cond is SYSMEM (GSP-written) —
+             * no MMIO read, so the os_pci dead-bus short-circuit never
+             * reaches this loop, and the 1 s timeout re-arms PER ELEMENT:
+             * a dead GSP turns one send into ~1 s x elemCount of silent
+             * GPU-group-lock hold (the worst silent-F44 substrate, GAP-2).
+             * Bail promptly on a lost bus; exits via the existing
+             * pNextElement==NULL error path. */
+            if (osIsGpuBusLost(pGpu))
                 break;
 
             if (gpuCheckTimeout(pGpu, &timeout) != NV_OK)

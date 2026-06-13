@@ -134,4 +134,18 @@ struct OBJGPU;
 void cleanupGpuLostStateAtomic(struct OBJGPU *pGpu,
                                nv_gpu_lost_detector_t detector_class);
 
+/*
+ * C7 (#292): read-only dead-bus predicate for the GSP poll engines.
+ *
+ * Thin exported wrapper over os.c's static-inline osIsGpuBusDead()
+ * (= os_pci_is_disconnected(nv->handle) OR PDB_PROP_GPU_IS_LOST).  The
+ * poll engines (timeoutCondWait, _kgspRpcRecvPoll, the hand-rolled
+ * msgq/FSP loops) call this to self-terminate promptly on a lost bus,
+ * instead of relying on the per-cond ACCIDENT of a 0xFFFFFFFF MMIO read
+ * happening to satisfy the condition (the #292 A13 live-FAIL lesson:
+ * _kgspRpcRecvPoll has no MMIO clause and stormed).  Pure READ: no lock,
+ * no PM-state write, NULL-safe, and a constant-FALSE no-op on a live bus.
+ */
+NvBool osIsGpuBusLost(struct OBJGPU *pGpu);
+
 #endif /* _NV_GPU_LOST_H_ */

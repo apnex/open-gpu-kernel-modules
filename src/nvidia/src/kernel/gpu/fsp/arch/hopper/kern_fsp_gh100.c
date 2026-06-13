@@ -635,7 +635,10 @@ _kfspWriteToEmem_GH100
     // instead of an assertion in the middle of HW touches.
     //
     if (reg32 == NV_GPU_BUS_DEAD_VALUE_U32 &&
-        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        osIsGpuBusLost(pGpu))   /* C7-e8 (#292): widened from PDB-only — in the
+                                 * os_pci-set/PDB-unset state the old conjunct was
+                                 * dead and this fell through to the :672 assert
+                                 * path instead of this clean abort. */
     {
         NV_GPU_LOST_LOG_ONCE(LEVEL_ERROR,
             "_kfspWriteToEmem_GH100: dead-bus read on EMEMC; aborting EMEM write\n");

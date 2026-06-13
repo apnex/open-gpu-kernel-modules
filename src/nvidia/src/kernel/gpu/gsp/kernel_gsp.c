@@ -312,7 +312,12 @@ _kgspRpcSanityCheck(OBJGPU *pGpu, KernelGsp *pKernelGsp, OBJRPC *pRpc)
         return NV_ERR_GPU_IN_FULLCHIP_RESET;
     }
     if (!API_GPU_ATTACHED_SANITY_CHECK(pGpu) ||
-        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ||
+        /* C7 (#292): also honor the lock-free os_pci marker — set by the AER
+         * early-free while a bootstrap worker is in flight, when the PDB
+         * setter is COND_ACQUIRE-deferred against the worker's reacquired
+         * API lock. */
+        osIsGpuBusLost(pGpu))
     {
         NV_PRINTF(LEVEL_INFO, "GPU lost, skipping RPC\n");
         return NV_ERR_GPU_IS_LOST;
@@ -2811,7 +2816,14 @@ _kgspRpcRecvPoll
     // architecture doc's "Open questions" item 9.
     //
     if (pKernelGsp->bFatalError ||
-        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+        pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST) ||
+        /* C7 (#292): honor the lock-free os_pci marker here too.  This is THE
+         * netcon3 storm fix: the post-INIT_DONE control-RPC poll honored only
+         * PDB, which the AER path could not set (COND_ACQUIRE deferred against
+         * the worker's reacquired API lock) — so the poll stormed the dead bus.
+         * OR-ing here (not a separate early return) preserves the
+         * bPollingForRpcResponse clear below. */
+        osIsGpuBusLost(pGpu))
     {
         /* The pre-loop short-circuit skips the done: label cleanup, so clear
          * bPollingForRpcResponse here -- otherwise the next entrant to
@@ -2971,13 +2983,23 @@ _kgspRpcRecvPoll
 done:
     pKernelGsp->bPollingForRpcResponse = NV_FALSE;
 
-    if (_kgspHeartbeatIsGspRmHeartbeatTimedOut(pGpu, pKernelGsp))
+    /* C7-e5 (#292): gate the heartbeat predicates (not just the prints) on a
+     * live bus — the predicate calls themselves read the dead PTIMER
+     * (tmrGetTimeEx -> "Consistently Bad TimeLo value ffffffff") and, on a
+     * lost bus, emitted the netcon3 printk storm (3 lines / ~0.1 ms per
+     * iteration) that amplified the wedge.  Belt-and-suspenders: the C7-e3
+     * pre-loop short-circuit already prevents re-entry from reaching done:
+     * on a lost bus. */
+    if (!osIsGpuBusLost(pGpu))
     {
-        NV_PRINTF(LEVEL_ERROR, "GSP RM heartbeat timed out\n");
-    }
-    if (_kgspHeartbeatIsLibosHeartbeatTimedOut(pGpu, pKernelGsp))
-    {
-        NV_PRINTF(LEVEL_ERROR, "LibOS heartbeat timed out\n");
+        if (_kgspHeartbeatIsGspRmHeartbeatTimedOut(pGpu, pKernelGsp))
+        {
+            NV_PRINTF(LEVEL_ERROR, "GSP RM heartbeat timed out\n");
+        }
+        if (_kgspHeartbeatIsLibosHeartbeatTimedOut(pGpu, pKernelGsp))
+        {
+            NV_PRINTF(LEVEL_ERROR, "LibOS heartbeat timed out\n");
+        }
     }
 
     if (bSlowGspRpc)

@@ -35,6 +35,7 @@
 #include "core/thread_state.h"
 #include "core/locks.h"
 #include "gpu_mgr/gpu_mgr.h"
+#include "gpu/nv-gpu-lost.h"   /* C7 (#292): osIsGpuBusLost dead-bus predicate */
 
 /* ------------------------ Public Functions  ------------------------------- */
 
@@ -590,6 +591,24 @@ timeoutCondWait
 
     while (!pCondFunc(pGpu, pCondData))
     {
+        /*
+         * C7 (#292): prompt, polarity-independent abort of every cond-wait on
+         * a lost bus (os_pci_is_disconnected OR PDB_PROP_GPU_IS_LOST).  This is
+         * the single engine chokepoint behind every gpuTimeoutCondWait caller
+         * (gpuTimeoutCondWait is a plain macro; there is no second cond-wait
+         * body).  Mirrors timeoutCheck's API_GPU_IN_RESET early-TIMEOUT
+         * precedent, which does NOT test the lost markers.  The break also
+         * deliberately bypasses the cond-recheck rescue below — on a dead bus
+         * that recheck IS the accidental-0xFFFFFFFF hazard.  Pure-FALSE no-op
+         * on a live bus.  (GAP-6 audit 2026-06-06: all 25 callers verified
+         * safe for an early NV_ERR_TIMEOUT.)
+         */
+        if ((pGpu != NULL) && osIsGpuBusLost(pGpu))
+        {
+            status = NV_ERR_TIMEOUT;
+            break;
+        }
+
         osSpinLoop();
 
         status = timeoutCheck(pTD, pTimeout, lineNum);

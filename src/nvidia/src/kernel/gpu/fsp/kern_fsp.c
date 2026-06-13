@@ -29,6 +29,7 @@
   */
 #include "gpu/gpu.h"
 #include "gpu/fsp/kern_fsp.h"
+#include "gpu/nv-gpu-lost.h"   /* C7 (#292): osIsGpuBusLost dead-bus predicate */
 #include "os/os.h"
 #include "nvrm_registry.h"
 #include "gpu_mgr/gpu_mgr.h"
@@ -410,6 +411,17 @@ kfspWaitForResponse
     // Poll for message queue to wait for FSP's reply
     while (!kfspIsResponseAvailable_HAL(pGpu, pKernelFsp))
     {
+        /* C7-e6 (#292): hand-rolled loop outside the timeoutCondWait engine —
+         * short-circuit explicitly on a lost bus (GAP-2).  The dead-value
+         * rescue below cannot flip this back to NV_OK (dead head==tail reads
+         * evaluate the response-available cond FALSE; GAP-6 audit). */
+        if (osIsGpuBusLost(pGpu))
+        {
+            status = NV_ERR_TIMEOUT;
+            NV_PRINTF(LEVEL_ERROR, "FSP response wait aborted: GPU bus lost\n");
+            break;
+        }
+
         osSpinLoop();
 
         status = kfspCheckResponseTimeout(pGpu, pKernelFsp);

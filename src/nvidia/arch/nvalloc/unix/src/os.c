@@ -1896,6 +1896,17 @@ static inline NvBool osIsGpuBusDead(OBJGPU *pGpu)
 }
 
 //
+// C7 (#292): exported thin wrapper over osIsGpuBusDead for the GSP poll
+// engines (declared in nv-gpu-lost.h).  osIsGpuBusDead itself stays
+// static inline so the per-register MMIO hot path is not de-inlined.
+// Read-only, lock-free, NULL-safe (via the inline's pGpu guard).
+//
+NvBool osIsGpuBusLost(OBJGPU *pGpu)
+{
+    return osIsGpuBusDead(pGpu);
+}
+
+//
 // v4 sink primitive: cleanupGpuLostStateAtomic.
 //
 // Single, idempotent per-GPU function called by every detection input

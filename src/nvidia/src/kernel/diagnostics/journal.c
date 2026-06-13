@@ -2931,7 +2931,8 @@ rcdbAddRmGpuDump
     // callbacks via nvdDumpAllEngines would only exercise the GSP-RPC
     // failure cascade against hardware that is no longer there.
     //
-    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    if (osIsGpuBusLost(pGpu))   /* C7-e7 (#292): widened from PDB-only — also
+                                 * honors the lock-free os_pci marker. */
     {
         // C5 v4: per-site log retired; canonical sink log fired at detection.
         return NV_OK;

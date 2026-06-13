@@ -1851,7 +1851,10 @@ static NV_STATUS _issueRpcAndWait(OBJGPU *pGpu, OBJRPC *pRpc)
     // the cleanup free path is handled separately in rpcRmApiFree_GSP,
     // which must return NV_OK because the resserv teardown asserts on it.
     //
-    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    if (osIsGpuBusLost(pGpu))   /* C7-e7 (#292): widened from PDB-only — also
+                                 * honors the lock-free os_pci marker (the only
+                                 * one settable while the bootstrap worker holds
+                                 * the reacquired API lock). */
     {
         // C5 v4: per-site log retired in favor of canonical sink-side log.
         return NV_ERR_GPU_IS_LOST;
@@ -2094,7 +2097,9 @@ static NV_STATUS _issueRpcLarge
     // (which carries G2). Mirror the same sink-check here so a lost GPU
     // short-circuits without spending the full chunked send/poll budget.
     //
-    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    if (osIsGpuBusLost(pGpu))   /* C7-e7 (#292): widened from PDB-only — also kills
+                                 * the per-chunk bare NV_ASSERT(0)s firing on a
+                                 * lost-bus chunked send. */
     {
         return NV_ERR_GPU_IS_LOST;
     }
@@ -11527,7 +11532,12 @@ NV_STATUS rpcRmApiFree_GSP
     // host-side bookkeeping instead of asserting. Guarding the one free
     // RPC here covers the whole cleanup cascade at a single site.
     //
-    if (pGpu->getProperty(pGpu, PDB_PROP_GPU_IS_LOST))
+    if (osIsGpuBusLost(pGpu))   /* C7-e7 (#292), LOAD-BEARING: widened from
+                                 * PDB-only.  In the os_pci-set/PDB-unset state
+                                 * (AER early-free; PDB COND_ACQUIRE-deferred)
+                                 * the PDB-only test let every freed object emit
+                                 * one LEVEL_ERROR + one NV_ASSERT — a print-storm
+                                 * of the exact class that wedged apnex.31. */
     {
         // C5 v4: per-site log retired in favor of canonical sink-side log.
         return NV_OK;
