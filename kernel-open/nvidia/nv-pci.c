@@ -1885,6 +1885,27 @@ nv_pci_probe
     nv_printf(NV_DBG_SETUP, "NVRM: probing 0x%x 0x%x, class 0x%x\n",
         pci_dev->vendor, pci_dev->device, pci_dev->class);
 
+    /*
+     * C8 (F48): never probe a surprise-removed / marked-disconnected device.
+     * pci_dev->error_state persists across driver rebind, so a modprobe after
+     * a contained in-flight failure (A13/C7 path) re-probes the SAME stale
+     * pci_dev: every config read returns 0xFF and probe-time pollers spin
+     * (live 2026-06-13: the PBI capability walk, F48).  Probing a device the
+     * kernel has already declared gone is never useful — a re-enumeration
+     * (slot-cycle / TB re-auth / cold-plug) creates a fresh pci_dev and
+     * probes cleanly.  Bail before any chip touch or allocation.
+     */
+    if (os_pci_is_disconnected(pci_dev))
+    {
+        nv_printf(NV_DBG_ERRORS,
+            "NVRM: tb_egpu [C8]: refusing to probe disconnected device "
+            "%04x:%02x:%02x.%x (stale surprise-removed pci_dev; "
+            "re-enumerate to recover)\n",
+            NV_PCI_DOMAIN_NUMBER(pci_dev), NV_PCI_BUS_NUMBER(pci_dev),
+            NV_PCI_SLOT_NUMBER(pci_dev), PCI_FUNC(pci_dev->devfn));
+        return -ENODEV;
+    }
+
 #ifdef NV_PCI_SRIOV_SUPPORT
     if (pci_dev->is_virtfn)
     {

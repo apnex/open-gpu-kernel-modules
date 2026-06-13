@@ -84,9 +84,27 @@ static NvU32 pciPbiFindCapability(void *handle)
     // Start at the beginning of the PCI capability list
     NvU32 cap_base = osPciReadByte(handle, PCI_CAPABILITY_LIST_BASE);
 
+    //
+    // C8 (F48): bound the walk. On a disconnected/surprise-removed device
+    // every config read returns 0xFF, so the unbounded walk spun forever
+    // (cap_base=0xFF is neither 0 nor a valid PBI cap -> infinite loop at
+    // full speed, no delay, no signal check; observed live 2026-06-13 as an
+    // unkillable modprobe pinned at 100% CPU holding the device lock).
+    // Mirror the kernel's own __pci_find_next_cap_ttl: TTL-bound the walk
+    // (48 = PCI_FIND_CAP_TTL) and treat the all-ones read as a terminator.
+    //
+    NvU32 ttl = 48;
+
     // Walk the PCI capability list looking for a match for PBI
-    while (cap_base != 0 && pciPbiCheck(handle, cap_base) != NV_OK)
+    while (cap_base != 0 && cap_base != 0xFF && ttl > 0 &&
+           pciPbiCheck(handle, cap_base) != NV_OK)
+    {
         cap_base = osPciReadByte(handle, cap_base + 1);
+        ttl--;
+    }
+
+    if (cap_base == 0xFF || ttl == 0)
+        return 0;   // dead bus or malformed list -> "PBI not found"
 
     return cap_base;
 }
